@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Q9 · CPU Offloading &amp; LMCache vs. EPP Prefix Scoring — llm-d Visual Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='%232dd4bf'/></svg>">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <a class="brand" href="index.html"><span class="logo-dot"></span> llm-d Visual Guide</a>
+    <div class="pager">
+      <a href="index.html">☰ All topics</a>
+      <a href="q8.html">← Q8</a>
+      <a href="q10.html">Q10 →</a>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="topic-hero reveal">
+    <span class="q-badge">QUESTION 09</span>
+    <h1>How do CPU offloading and LMCache affect EPP prefix scoring?</h1>
+    <p class="lede">
+      <strong>Short answer:</strong> in precise mode EPP can represent <em>CPU-resident</em> KV blocks
+      and score them lower than GPU-resident ones — the shipped tier weights are
+      <strong>gpu 1.0, cpu 0.8</strong>. EPP never inspects CPU memory or calls LMCache at routing time;
+      it relies on <em>tier-bearing events</em>. Native vLLM CPU offloading emits both stores and
+      evictions, so EPP can track both. The <strong>LMCache wrapper at the pinned revision converts
+      every event into a store</strong> — evictions never propagate through that path, so EPP can keep
+      stale positives.
+    </p>
+  </section>
+
+  <section class="section reveal">
+    <div class="analogy">
+      <div class="emoji">🚗</div>
+      <div class="body">
+        <span class="a-title">Analogy: valet parking with a garage across the street</span>
+        Think of the GPU as the <strong>front lot</strong> right by the restaurant door and the CPU as a
+        <strong>garage across the street</strong>. The valet desk (EPP) keeps a ticket book of where each
+        car is. A car in the garage is still retrievable — just slower — so the desk values a garage ticket
+        a bit less than a front-lot ticket (0.8 vs 1.0). Now two twists: if a ticket names a lot the desk
+        has <em>never heard of</em>, the desk assumes it's the front lot (full value!). And one of the
+        garage operators (LMCache) <strong>mails in new tickets but never reports towing a car away</strong> —
+        so the desk keeps promising cars that are long gone.
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== SECTION 1: tier-aware scoring ===== -->
+  <section class="section reveal">
+    <h2><span class="num">1</span> Tier weights: how a CPU block scores against a GPU block</h2>
+    <div class="prose">
+      <p>
+        A <strong>tier</strong> is the physical location of a KV block: GPU memory, CPU memory, a
+        filesystem, an object store. In precise mode, every index entry carries a tier alongside the pod,
+        and the scorer applies a configured <strong>weight per tier</strong>. The defaults —
+        <code>gpu: 1.0</code>, <code>cpu: 0.8</code> — are <em>routing preferences</em>, not measured
+        latencies. They just say: for an otherwise comparable prefix, a GPU-resident block should count
+        for more than a CPU-resident one.
+      </p>
+      <p>
+        The algorithm walks the request's prefix block by block. For each block, each pod contributes its
+        <strong>highest configured tier weight</strong> for that block — a pod holding the same block on
+        both GPU and CPU takes the larger weight once, with <strong>no double counting</strong>. Weights
+        accumulate only while the prefix stays <strong>consecutive</strong>; the streak stops at the first
+        block a pod doesn't have. The weight map lives under the precise producer's
+        <code>parameters.indexerConfig.kvCacheBackendConfigs</code>.
+      </p>
+    </div>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> Three pods, three tiers — weighted consecutive-prefix scoring</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tier-aware prefix scoring across three pods">
+          <defs>
+            <marker id="q9a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <!-- request prefix -->
+          <g class="dimmable" data-s="1,2,3,4,5">
+            <rect class="zone-box" x="20" y="28" width="920" height="108"/>
+            <text class="t-zone" x="40" y="54">REQUEST PREFIX — CHAINED BLOCK KEYS, SCORED LEFT TO RIGHT</text>
+          </g>
+
+          <g class="dimmable" data-s="1">
+            <rect class="inner-box" x="70" y="66" width="150" height="44"/>
+            <text class="t-mono" x="145" y="93" text-anchor="middle">block k1</text>
+            <rect class="inner-box" x="260" y="66" width="150" height="44"/>
+            <text class="t-mono" x="335" y="93" text-anchor="middle">block k2</text>
+            <rect class="inner-box" x="450" y="66" width="150" height="44"/>
+            <text class="t-mono" x="525" y="93" text-anchor="middle">block k3</text>
+            <rect class="inner-box" x="640" y="66" width="150" height="44"/>
+            <text class="t-mono" x="715" y="93" text-anchor="middle">block k4</text>
+            <path class="edge" d="M220,88 L260,88" marker-end="url(#q9a)"/>
+            <path class="edge" d="M410,88 L450,88" marker-end="url(#q9a)"/>
+            <path class="edge" d="M600,88 L640,88" marker-end="url(#q9a)"/>
+            <text class="t-tiny" x="865" y="93" text-anchor="middle">accumulate while</text>
+            <text class="t-tiny" x="865" y="107" text-anchor="middle">consecutive</text>
+          </g>
+
+          <!-- pod A -->
+          <g class="dimmable" data-s="2,5">
+            <rect class="node-box s-storage" x="40" y="165" width="280" height="190" rx="12"/>
+            <text class="t-title" x="180" y="193" text-anchor="middle">pod A — GPU entries</text>
+            <rect class="inner-box" x="58" y="207" width="244" height="26"/>
+            <text class="t-mono" x="180" y="224" text-anchor="middle">k1 · gpu → weight 1.0</text>
+            <rect class="inner-box" x="58" y="239" width="244" height="26"/>
+            <text class="t-mono" x="180" y="256" text-anchor="middle">k2 · gpu → weight 1.0</text>
+            <rect class="inner-box" x="58" y="271" width="244" height="26"/>
+            <text class="t-mono" x="180" y="288" text-anchor="middle">k3 · gpu → weight 1.0</text>
+            <text class="t-tiny" x="180" y="318" text-anchor="middle">k4: not indexed for this pod</text>
+            <text class="t-tiny" x="180" y="336" text-anchor="middle">→ the streak stops after k3</text>
+          </g>
+
+          <!-- pod B -->
+          <g class="dimmable" data-s="3,5,6">
+            <rect class="node-box s-client" x="340" y="165" width="280" height="190" rx="12"/>
+            <text class="t-title" x="480" y="193" text-anchor="middle">pod B — CPU entries</text>
+            <rect class="inner-box" x="358" y="207" width="244" height="26"/>
+            <text class="t-mono" x="480" y="224" text-anchor="middle">k1 · cpu → weight 0.8</text>
+            <rect class="inner-box" x="358" y="239" width="244" height="26"/>
+            <text class="t-mono" x="480" y="256" text-anchor="middle">k2 · cpu → weight 0.8</text>
+            <rect class="inner-box" x="358" y="271" width="244" height="26"/>
+            <text class="t-mono" x="480" y="288" text-anchor="middle">k3 · cpu → weight 0.8</text>
+            <rect class="inner-box" x="358" y="303" width="244" height="26"/>
+            <text class="t-mono" x="480" y="320" text-anchor="middle">k4 · cpu → weight 0.8</text>
+            <text class="t-tiny" x="480" y="344" text-anchor="middle">same block on GPU + CPU? take the max once</text>
+          </g>
+
+          <!-- pod C -->
+          <g class="dimmable" data-s="4,5">
+            <rect class="node-box s-danger" x="640" y="165" width="280" height="190" rx="12"/>
+            <text class="t-title" x="780" y="193" text-anchor="middle">pod C — tier "fs" (unconfigured)</text>
+            <rect class="inner-box" x="658" y="207" width="244" height="26"/>
+            <text class="t-mono" x="780" y="224" text-anchor="middle">k1 · fs → FALLBACK 1.0</text>
+            <rect class="inner-box" x="658" y="239" width="244" height="26"/>
+            <text class="t-mono" x="780" y="256" text-anchor="middle">k2 · fs → FALLBACK 1.0</text>
+            <text class="t-tiny" x="780" y="292" text-anchor="middle">tier name not in the weight map</text>
+            <text class="t-tiny" x="780" y="310" text-anchor="middle" style="fill:var(--danger)">→ valued exactly like a GPU hit</text>
+            <text class="t-tiny" x="780" y="334" text-anchor="middle">k3, k4: not indexed for this pod</text>
+          </g>
+
+          <!-- results -->
+          <g class="dimmable" data-s="5,6">
+            <rect class="zone-box" x="20" y="385" width="920" height="155"/>
+            <text class="t-zone" x="40" y="411">WEIGHTED CONSECUTIVE-PREFIX SCORE (illustrative arithmetic)</text>
+          </g>
+
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-storage" x="40" y="428" width="280" height="94" rx="12"/>
+            <text class="t-mono" x="180" y="460" text-anchor="middle">1.0 + 1.0 + 1.0 = 3.0</text>
+            <text class="t-tiny" x="180" y="484" text-anchor="middle">3 consecutive GPU blocks</text>
+            <text class="t-tiny" x="180" y="502" text-anchor="middle">published as int → 3</text>
+          </g>
+
+          <g class="dimmable" data-s="5,6">
+            <rect class="node-box s-client" x="340" y="428" width="280" height="94" rx="12"/>
+            <text class="t-mono" x="480" y="460" text-anchor="middle">0.8 × 4 = 3.2 → int 3</text>
+            <text class="t-tiny" x="480" y="484" text-anchor="middle">4 consecutive CPU blocks</text>
+            <text class="t-tiny" x="480" y="502" text-anchor="middle">float accumulates, producer truncates</text>
+          </g>
+
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-danger" x="640" y="428" width="280" height="94" rx="12"/>
+            <text class="t-mono" x="780" y="460" text-anchor="middle">1.0 + 1.0 = 2.0</text>
+            <text class="t-tiny" x="780" y="484" text-anchor="middle">2 blocks on an unknown tier</text>
+            <text class="t-tiny" x="780" y="502" text-anchor="middle" style="fill:var(--danger)">the fallback made fs look like GPU</text>
+          </g>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--storage)"></i> GPU tier (1.0)</span>
+        <span><i style="background:var(--client)"></i> CPU tier (0.8)</span>
+        <span><i style="background:var(--danger)"></i> Unconfigured tier (fallback 1.0)</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"One request prefix, three candidate pods holding the same blocks on different tiers, and the weighted scores that result. The pod C column is the configuration trap."},
+        {"text":"The request's prompt is turned into <strong>chained block keys</strong> k1…k4. The scorer walks them left to right, and each pod accumulates weight only while its match stays <strong>consecutive</strong> — the first missing block ends that pod's streak."},
+        {"text":"<strong>Pod A</strong> holds k1–k3 on the <strong>GPU</strong>. Each block contributes the configured gpu weight, 1.0. It has no entry for k4, so its streak ends at three blocks."},
+        {"text":"<strong>Pod B</strong> holds all four blocks on the <strong>CPU</strong>, each contributing 0.8. If a pod held the same block on both GPU and CPU, the scorer would take the larger weight once — entries are <strong>never double-counted</strong>."},
+        {"text":"<strong>Pod C</strong> reports its blocks on a tier named <code>fs</code> that nobody configured. The weight lookup starts at <strong>1.0 and only replaces it when the tier name exists in the map</strong> — so an unknown tier is silently valued like a GPU hit. This is the trap: normalize tier names and configure every admitted tier."},
+        {"text":"The totals: A scores 3.0 (three GPU blocks), B scores 3.2 (four CPU blocks), C scores 2.0 — inflated by the fallback. Note B's <em>longer</em> prefix on a <em>slower</em> tier legitimately beat A here; that's the weights doing their job."},
+        {"text":"One more quirk: the scorer accumulates <strong>floats</strong>, but the producer converts each aggregate to <strong>int</strong> before publishing. With cpu = 0.8, one CPU-only matched block contributes 0 after conversion; two contribute 1. Very short CPU-only matches can quantize to nothing."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="callout danger">
+      <div class="co-title">⚠ The unconfigured-tier fallback</div>
+      <code>fillMaxWeights</code> starts at <strong>1.0</strong> and replaces it only when the tier name
+      exists in the configured weight map. Any connector-specific or misspelled tier name —
+      <code>fs</code>, <code>obj</code>, anything unexpected — is therefore valued <strong>like GPU</strong>.
+      The shipped defaults define only <code>gpu</code> and <code>cpu</code>. Operators must verify that
+      event tier strings normalize to configured keys and deliberately configure every tier they admit.
+    </div>
+
+    <div class="callout info">
+      <div class="co-title">ⓘ The int-quantization quirk</div>
+      The scorer accumulates floating-point weights, but the producer converts each aggregate to
+      <code>int</code> before storing the published match info. With the default CPU weight 0.8:
+      <strong>one CPU-only matched block → 0; two → 1</strong>. Keep this in mind when interpreting
+      per-tier cached-block counts on an endpoint.
+    </div>
+  </section>
+
+  <!-- ===== SECTION 2: the two event paths ===== -->
+  <section class="section reveal">
+    <h2><span class="num">2</span> How a CPU location reaches EPP — and where LMCache differs</h2>
+    <div class="prose">
+      <p>
+        <strong>CPU offloading</strong> means the engine moves KV blocks from GPU memory to CPU memory to
+        free GPU space, keeping them retrievable without a full recompute. <strong>LMCache</strong> is an
+        external KV-cache engine that vLLM can plug in through a connector. Both can tell EPP about CPU
+        residency — but through very different event paths, with very different completeness.
+      </p>
+      <p>
+        A detail worth knowing first: an offload event can be <strong>location-only</strong> — block hashes
+        plus a new tier, without repeating the tokens. EPP resolves those engine keys through its existing
+        engine-key → request-key mapping. If a key is unknown (the original store event was missed, or the
+        index restarted), the update is <strong>skipped, not guessed</strong>.
+      </p>
+    </div>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> Native CPU offloading vs. the LMCache wrapper — who reports evictions?</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Native CPU offload events versus LMCache wrapper events">
+          <defs>
+            <marker id="q9b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <!-- native side -->
+          <g class="dimmable" data-s="1,2,3">
+            <rect class="zone-box" x="20" y="28" width="445" height="320"/>
+            <text class="t-zone" x="40" y="54">NATIVE VLLM CPU OFFLOADING</text>
+          </g>
+
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-model" x="45" y="75" width="170" height="64" rx="12"/>
+            <text class="t-title" x="130" y="102" text-anchor="middle">GPU KV cache</text>
+            <text class="t-tiny" x="130" y="124" text-anchor="middle">blocks under pressure</text>
+          </g>
+
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-model" x="255" y="75" width="185" height="80" rx="12"/>
+            <text class="t-title" x="347" y="103" text-anchor="middle">CPU offload manager</text>
+            <text class="t-tiny" x="347" y="125" text-anchor="middle">stores blocks in CPU memory,</text>
+            <text class="t-tiny" x="347" y="141" text-anchor="middle">later evicts by its own policy</text>
+          </g>
+
+          <path class="edge e-model flow dimmable" data-s="1" d="M215,107 L255,107" marker-end="url(#q9b)"/>
+
+          <g class="dimmable" data-s="2,3">
+            <rect class="node-box s-storage" x="95" y="205" width="300" height="110" rx="12"/>
+            <text class="t-title" x="245" y="233" text-anchor="middle">Generic offload tracker</text>
+            <text class="t-mono" x="245" y="258" text-anchor="middle">removed=False → BlockStored</text>
+            <text class="t-mono" x="245" y="282" text-anchor="middle">removed=True  → BlockRemoved</text>
+            <text class="t-tiny" x="245" y="304" text-anchor="middle">BOTH event kinds emitted</text>
+          </g>
+
+          <path class="edge e-model flow dimmable" data-s="2" d="M347,155 C347,180 245,180 245,205" marker-end="url(#q9b)"/>
+
+          <!-- lmcache side -->
+          <g class="dimmable" data-s="4,5">
+            <rect class="zone-box" x="495" y="28" width="445" height="320"/>
+            <text class="t-zone" x="515" y="54">LMCACHE CONNECTOR (pinned vLLM revision)</text>
+          </g>
+
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-model" x="520" y="75" width="170" height="64" rx="12"/>
+            <text class="t-title" x="605" y="102" text-anchor="middle">GPU KV cache</text>
+            <text class="t-tiny" x="605" y="124" text-anchor="middle">connector moves blocks</text>
+          </g>
+
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-proxy" x="730" y="75" width="185" height="80" rx="12"/>
+            <text class="t-title" x="822" y="103" text-anchor="middle">LMCache engine</text>
+            <text class="t-tiny" x="822" y="125" text-anchor="middle">its own storage, its own</text>
+            <text class="t-tiny" x="822" y="141" text-anchor="middle">eviction decisions</text>
+          </g>
+
+          <path class="edge e-proxy flow dimmable" data-s="4" d="M690,107 L730,107" marker-end="url(#q9b)"/>
+
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-danger" x="545" y="205" width="340" height="110" rx="12"/>
+            <text class="t-title" x="715" y="231" text-anchor="middle">LMCacheConnectorV1</text>
+            <text class="t-mono" x="715" y="255" text-anchor="middle">get_kv_connector_kv_cache_events()</text>
+            <text class="t-sub" x="715" y="279" text-anchor="middle">EVERY returned event → BlockStored</text>
+            <text class="t-tiny" x="715" y="301" text-anchor="middle" style="fill:var(--danger)">no BlockRemoved branch in this method</text>
+          </g>
+
+          <path class="edge e-proxy flow dimmable" data-s="5" d="M822,155 C822,180 715,180 715,205" marker-end="url(#q9b)"/>
+
+          <!-- EPP index -->
+          <g class="dimmable" data-s="3,5,6">
+            <rect class="node-box s-epp" x="330" y="420" width="300" height="90" rx="12"/>
+            <text class="t-title" x="480" y="450" text-anchor="middle">EPP tiered index</text>
+            <text class="t-sub" x="480" y="472" text-anchor="middle">pod + tier entries</text>
+            <text class="t-tiny" x="480" y="492" text-anchor="middle">trusts whatever events arrive</text>
+          </g>
+
+          <path class="edge e-storage flow dimmable" data-s="3" d="M245,315 C245,375 390,375 390,420" marker-end="url(#q9b)"/>
+          <text class="t-label dimmable" data-s="3" x="255" y="390" text-anchor="middle">stores + removals</text>
+
+          <path class="edge e-storage flow dimmable" data-s="5,6" d="M715,315 C715,375 570,375 570,420" marker-end="url(#q9b)"/>
+          <text class="t-label dimmable" data-s="5,6" x="705" y="390" text-anchor="middle">stores only</text>
+
+          <g class="dimmable" data-s="6">
+            <rect class="node-box s-danger" x="680" y="420" width="240" height="90" rx="12"/>
+            <text class="t-sub" x="800" y="448" text-anchor="middle">if LMCache drops an entry:</text>
+            <text class="t-sub" x="800" y="468" text-anchor="middle" style="fill:var(--danger)">EPP keeps a stale positive</text>
+            <text class="t-tiny" x="800" y="492" text-anchor="middle">plus Q8's ZMQ loss boundaries apply</text>
+          </g>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--model)"></i> vLLM / GPU side</span>
+        <span><i style="background:var(--proxy)"></i> LMCache</span>
+        <span><i style="background:var(--storage)"></i> Event flow (delivered)</span>
+        <span><i style="background:var(--epp)"></i> EPP index</span>
+        <span><i style="background:var(--danger)"></i> Missing removal path</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"Two ways CPU-resident KV state can be reported to EPP: the native vLLM offload path (left) emits both stores and evictions; the LMCache wrapper path (right) emits stores only."},
+        {"text":"On the native side, the <strong>CPU offload manager</strong> moves blocks from GPU to CPU memory, and later evicts CPU blocks by its own policy. It records eviction candidates as <code>removed=True</code> offload events before reusing their blocks, and <code>removed=False</code> after a successful store."},
+        {"text":"The <strong>generic offload tracker</strong> translates those flags into the public event types: removed=False becomes <strong>BlockStored</strong>, removed=True becomes <strong>BlockRemoved</strong>. Both kinds exist on this path."},
+        {"text":"So when events are enabled and delivered, EPP learns about <strong>both CPU stores and native CPU evictions</strong>. Delivery still rides the ZMQ pipeline from Q8 — high-water-mark drops and restarts still apply."},
+        {"text":"On the LMCache side, the <strong>LMCache engine</strong> manages its own storage and makes its own eviction decisions, behind a vLLM connector."},
+        {"text":"At the pinned vLLM revision, <code>LMCacheConnectorV1.get_kv_connector_kv_cache_events()</code> converts <strong>every event LMCache returns into BlockStored</strong> — the method has no branch producing BlockRemoved. This is a claim about <em>this wrapper path at this revision</em>, not about all LMCache versions."},
+        {"text":"Consequence: EPP can index LMCache-reported locations, but if LMCache later drops an entry and no removal reaches EPP by another proven path, EPP keeps a <strong>stale positive</strong> — it will keep routing toward a cache entry that no longer exists."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="callout warn">
+      <div class="co-title">⚠ Keep the LMCache claim narrow</div>
+      The finding is specific: <em>this wrapper method, at this pinned vLLM revision</em>, converts every
+      returned event into <code>BlockStored</code> with no <code>BlockRemoved</code> conversion. It is not
+      a statement about every LMCache version or every external integration. A deployment claiming
+      eviction-correct LMCache routing must identify the exact LMCache version, the event object schema,
+      the wrapper conversion, and an end-to-end remove test.
+    </div>
+
+    <div class="callout info">
+      <div class="co-title">ⓘ Skipped, not guessed</div>
+      When a location-only offload event references engine keys EPP has never seen — because the original
+      store event was missed or the index restarted — EPP <strong>skips the update</strong> rather than
+      inventing an entry. That's the safe choice, but it means one missed store can silently suppress all
+      later tier updates for those blocks.
+    </div>
+  </section>
+
+  <!-- ===== SECTION 3: operational policy ===== -->
+  <section class="section reveal">
+    <h2><span class="num">3</span> Setting tier weights like an operator, not a copy-paster</h2>
+    <div class="prose">
+      <p>
+        The 1.0 / 0.8 defaults are reasonable starting preferences for GPU and CPU, but the right values
+        for <em>your</em> deployment come from measurement: what does using a hit on that tier actually
+        cost relative to recomputing, under your current load?
+      </p>
+    </div>
+
+    <ol class="steps-list">
+      <li><strong>Measure before weighting.</strong> Capture transfer time, deserialize/copy time, contention, hit probability, and the effect on time to first token for each tier. Derive weights from those costs — don't copy illustrative numbers into production.</li>
+      <li><strong>Verify tier-name normalization.</strong> Confirm that the tier string in real events normalizes to a key in <code>parameters.indexerConfig.kvCacheBackendConfigs</code>. Any unmatched name silently gets the 1.0 fallback.</li>
+      <li><strong>Test the removal path end to end.</strong> Force a CPU eviction and check that EPP's per-tier cached-block counts actually change. If they don't, your eviction events aren't arriving — and every CPU entry is a future stale positive.</li>
+      <li><strong>Confirm both event kinds arrive.</strong> Stores prove the happy path; removals prove the correction path. A connector that only ever sends stores (like the LMCache wrapper above) needs an explicit operating policy.</li>
+    </ol>
+  </section>
+
+  <section class="section reveal">
+    <div class="takeaways">
+      <h2>Key takeaways</h2>
+      <ul>
+        <li><strong>EPP can score CPU-resident blocks in precise mode</strong> — default tier weights are gpu 1.0, cpu 0.8, and they are routing preferences, not measured latencies.</li>
+        <li>The scorer takes each pod's <strong>highest tier weight per block, accumulated while the prefix stays consecutive</strong>; GPU + CPU copies of the same block are never double-counted.</li>
+        <li><strong>Unknown tier names fall back to weight 1.0</strong> — an unconfigured tier is valued like GPU. Normalize tier strings and configure every admitted tier.</li>
+        <li><strong>Floats accumulate, ints publish:</strong> one CPU-only matched block (0.8) publishes as 0; two (1.6) publish as 1.</li>
+        <li><strong>Native CPU offloading emits both stores and evictions</strong> via the generic tracker — EPP can learn both, subject to Q8's ZMQ loss boundaries.</li>
+        <li><strong>The LMCache wrapper at the pinned revision converts every event to BlockStored</strong> — no removals propagate through that path, so a dropped LMCache entry can leave EPP with a stale positive.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sources reveal">
+    <h2>Verified sources</h2>
+    <ul>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvcache/backend.go#L19-L30" target="_blank" rel="noopener">backend.go — default tier weights: gpu 1.0, cpu 0.8</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvcache/kvblock_scorer.go#L89-L153" target="_blank" rel="noopener">kvblock_scorer.go — tier-aware consecutive-prefix scoring + fillMaxWeights fallback</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvcache/indexer.go#L35-L58" target="_blank" rel="noopener">indexer.go — kvCacheBackendConfigs configuration field</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/pool.go#L281-L325" target="_blank" rel="noopener">pool.go — location-only updates resolved via engine-key mapping, skipped when unknown</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/producer.go#L282-L305" target="_blank" rel="noopener">preciseprefixcache/producer.go — float score accumulation, int conversion on publish</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/producer.go#L242-L325" target="_blank" rel="noopener">preciseprefixcache/producer.go — request-side lookup and endpoint update</a></li>
+      <li><a href="https://github.com/vllm-project/vllm/blob/ab3c1aedf3b9677c1e43b391478554a4b110419e/vllm/v1/kv_offload/cpu/manager.py#L180-L243" target="_blank" rel="noopener">cpu/manager.py — eviction recorded as removed=True before block reuse</a></li>
+      <li><a href="https://github.com/vllm-project/vllm/blob/ab3c1aedf3b9677c1e43b391478554a4b110419e/vllm/v1/kv_offload/cpu/manager.py#L245-L298" target="_blank" rel="noopener">cpu/manager.py — removed=False after successful store</a></li>
+      <li><a href="https://github.com/vllm-project/vllm/blob/ab3c1aedf3b9677c1e43b391478554a4b110419e/vllm/distributed/kv_transfer/kv_connector/v1/offloading/events.py#L119-L135" target="_blank" rel="noopener">offloading/events.py — removed flag → BlockStored / BlockRemoved translation</a></li>
+      <li><a href="https://github.com/vllm-project/vllm/blob/ab3c1aedf3b9677c1e43b391478554a4b110419e/vllm/distributed/kv_transfer/kv_connector/v1/offloading/events.py#L215-L286" target="_blank" rel="noopener">offloading/events.py — generic tracker event emission</a></li>
+      <li><a href="https://github.com/vllm-project/vllm/blob/ab3c1aedf3b9677c1e43b391478554a4b110419e/vllm/distributed/kv_transfer/kv_connector/v1/lmcache_connector.py#L230-L254" target="_blank" rel="noopener">lmcache_connector.py — every returned event constructed as BlockStored (no removal branch)</a></li>
+    </ul>
+  </section>
+
+  <nav class="footer-nav reveal">
+    <a href="q8.html"><span class="dir">← Previous</span><span class="name">Q8 · KV-Cache Eviction &amp; How EPP Learns</span></a>
+    <a class="next" href="q10.html"><span class="dir">Next →</span><span class="name">Q10 · Filesystem, CephFS &amp; Object-Store Tiers</span></a>
+  </nav>
+</main>
+
+<footer class="site-footer"><div class="container">llm-d Visual Architecture Guide</div></footer>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llm-d Visual Architecture Guide</title>
+<meta name="description" content="Animated, step-by-step architecture diagrams explaining llm-d's Endpoint Picker (EPP), KV-cache aware routing, prefill/decode disaggregation, and more.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='%232dd4bf'/></svg>">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <a class="brand" href="index.html"><span class="logo-dot"></span> llm-d Visual Guide</a>
+    <nav class="header-nav">
+      <a href="#topics">Topics</a>
+      <a href="#map">Big Picture</a>
+      <a href="#glossary">Glossary</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero container">
+    <span class="eyebrow">● 10 topics · animated diagrams · zero fluff</span>
+    <h1>How llm-d Routes<br>LLM Inference Requests</h1>
+    <p class="sub">
+      A visual, step-by-step guide to the <strong>Endpoint Picker (EPP)</strong> — the routing brain
+      of llm-d. Every diagram animates the real request flow so you can watch data move
+      through the system instead of decoding ASCII art.
+    </p>
+  </section>
+
+  <!-- ============ BIG PICTURE DIAGRAM ============ -->
+  <section id="map" class="container section reveal">
+    <h2><span class="num">MAP</span> The 30-second big picture</h2>
+    <p class="prose" style="color:#c3cede; margin-bottom: 0.5rem;">
+      Before diving into any topic, hold this one picture in your head. Everything else on this
+      site is a zoom-in on one of these boxes or arrows. Press <strong>Play</strong> to watch a request travel.
+    </p>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> One inference request, end to end</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 460" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="High level llm-d architecture">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <!-- zones -->
+          <g class="dimmable" data-s="1,2,3,4,5">
+            <rect class="zone-box" x="290" y="30" width="650" height="410" rx="16"/>
+            <text class="t-zone" x="310" y="55">KUBERNETES CLUSTER</text>
+          </g>
+
+          <!-- client -->
+          <g class="dimmable" data-s="1,5">
+            <rect class="node-box s-client" x="30" y="180" width="150" height="80" rx="12"/>
+            <text class="t-title" x="105" y="215" text-anchor="middle">Client</text>
+            <text class="t-sub" x="105" y="236" text-anchor="middle">OpenAI-style request</text>
+          </g>
+
+          <!-- proxy -->
+          <g class="dimmable" data-s="1,2,4,5">
+            <rect class="node-box s-proxy" x="330" y="175" width="170" height="90" rx="12"/>
+            <text class="t-title" x="415" y="207" text-anchor="middle">Gateway / Proxy</text>
+            <text class="t-sub" x="415" y="227" text-anchor="middle">Envoy · Istio · L7 LB</text>
+            <text class="t-tiny" x="415" y="246" text-anchor="middle">owns the HTTP connections</text>
+          </g>
+
+          <!-- EPP -->
+          <g class="dimmable" data-s="2,3">
+            <rect class="node-box s-epp" x="580" y="70" width="200" height="130" rx="12"/>
+            <text class="t-title" x="680" y="98" text-anchor="middle">EPP</text>
+            <text class="t-sub" x="680" y="117" text-anchor="middle">Endpoint Picker</text>
+            <rect class="inner-box" x="600" y="130" width="160" height="26" rx="7"/>
+            <text class="t-mono" x="680" y="147" text-anchor="middle">filter → score → pick</text>
+            <text class="t-tiny" x="680" y="180" text-anchor="middle">decides WHERE — never carries the tokens</text>
+          </g>
+
+          <!-- model servers -->
+          <g class="dimmable" data-s="3,4,5">
+            <rect class="node-box s-model" x="590" y="270" width="110" height="92" rx="12"/>
+            <text class="t-title" x="645" y="300" text-anchor="middle">vLLM A</text>
+            <text class="t-tiny" x="645" y="322" text-anchor="middle">GPU · KV cache</text>
+            <text class="t-tiny" x="645" y="340" text-anchor="middle">prefill + decode</text>
+          </g>
+          <g class="dimmable" data-s="3">
+            <rect class="node-box s-model" x="715" y="270" width="110" height="92" rx="12"/>
+            <text class="t-title" x="770" y="300" text-anchor="middle">vLLM B</text>
+            <text class="t-tiny" x="770" y="322" text-anchor="middle">GPU · KV cache</text>
+            <text class="t-tiny" x="770" y="340" text-anchor="middle">prefill + decode</text>
+          </g>
+          <g class="dimmable" data-s="3">
+            <rect class="node-box s-model" x="840" y="270" width="80" height="92" rx="12"/>
+            <text class="t-title" x="880" y="305" text-anchor="middle">…N</text>
+            <text class="t-tiny" x="880" y="330" text-anchor="middle">more pods</text>
+          </g>
+
+          <!-- edges -->
+          <path class="edge e-client flow dimmable" data-s="1" d="M180,210 L330,210" marker-end="url(#arr)"/>
+          <text class="t-label dimmable" data-s="1" x="255" y="200" text-anchor="middle">1 · HTTP</text>
+
+          <path class="edge e-epp flow dimmable" data-s="2" d="M500,195 C540,175 550,150 580,140" marker-end="url(#arr)"/>
+          <text class="t-label dimmable" data-s="2" x="528" y="150" text-anchor="middle">2 · ext-proc</text>
+
+          <path class="edge e-epp flow dimmable" data-s="3" d="M680,200 L680,215 C680,240 560,225 510,250" marker-end="url(#arr)"/>
+          <text class="t-label dimmable" data-s="3" x="660" y="238" text-anchor="middle">3 · “send it to A”</text>
+
+          <path class="edge e-model flow dimmable" data-s="4" d="M470,265 C510,290 550,305 590,312" marker-end="url(#arr)"/>
+          <text class="t-label dimmable" data-s="4" x="512" y="312" text-anchor="middle">4 · forward</text>
+
+          <path class="edge e-client flow dimmable" data-s="5" d="M330,245 C260,260 200,250 180,240" marker-end="url(#arr)"/>
+          <text class="t-label dimmable" data-s="5" x="250" y="275" text-anchor="middle">5 · streamed tokens</text>
+
+          <!-- background metrics hint -->
+          <g class="dimmable" data-s="3">
+            <path class="edge e-metrics" stroke-dasharray="3 5" d="M645,270 C640,240 660,215 672,202" marker-end="url(#arr)"/>
+            <text class="t-tiny" x="600" y="235" text-anchor="middle">/metrics polled</text>
+            <text class="t-tiny" x="600" y="250" text-anchor="middle">in background</text>
+          </g>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--client)"></i> Client traffic</span>
+        <span><i style="background:var(--proxy)"></i> Proxy / gateway</span>
+        <span><i style="background:var(--epp)"></i> EPP decision plane</span>
+        <span><i style="background:var(--model)"></i> Model servers</span>
+        <span><i style="background:var(--metrics)"></i> Telemetry</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"The complete picture: a client talks to a <strong>proxy</strong>, the proxy asks <strong>EPP</strong> where to send the request, and a <strong>vLLM pod</strong> does the actual AI work. EPP never touches the response bytes."},
+        {"text":"A client sends a normal OpenAI-style HTTP request (chat/completions). It hits the <strong>Gateway/Proxy</strong> — the only component that holds client connections."},
+        {"text":"The proxy pauses and consults <strong>EPP</strong> over the <code>ext-proc</code> gRPC protocol: <em>“I have this request — which backend pod should get it?”</em>"},
+        {"text":"EPP runs its pipeline — <strong>filter → score → pick</strong> — over all candidate pods, using metrics it already collected in the background. It answers with one destination: <em>vLLM A</em>."},
+        {"text":"The proxy opens the connection to the chosen pod and forwards the request. The pod runs <strong>prefill</strong> (process the prompt) and <strong>decode</strong> (generate tokens)."},
+        {"text":"Tokens stream back through the proxy to the client. Notice: the response path never passes through EPP — it is a <strong>decision service</strong>, not a data pipe."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+  </section>
+
+  <!-- ============ TOPIC CARDS ============ -->
+  <section id="topics" class="container section reveal">
+    <h2><span class="num">01–10</span> The ten questions</h2>
+    <p style="color:#c3cede; margin-bottom: 0.5rem;">
+      Follow them in order — each one builds on the previous. Or jump straight to what confuses you.
+    </p>
+    <div class="topic-grid">
+      <a class="topic-card" href="q1.html" style="--accent:#2dd4bf">
+        <span class="card-num">QUESTION 01</span>
+        <h3>The EPP Request Pipeline</h3>
+        <p>What actually happens between “request arrives” and “pod chosen” — filter, score, pick, and everything around them.</p>
+        <span class="card-cta">Learn it →</span>
+      </a>
+      <a class="topic-card" href="q2.html" style="--accent:#60a5fa">
+        <span class="card-num">QUESTION 02</span>
+        <h3>Metrics: Collected vs. Scored</h3>
+        <p>Which vLLM metrics EPP collects, which three actually drive the default routing score, and why they're different lists.</p>
+        <span class="card-cta">Learn it →</span>
+      </a>
+      <a class="topic-card" href="q3.html" style="--accent:#a78bfa">
+        <span class="card-num">QUESTION 03</span>
+        <h3>Does EPP Run a Tokenizer?</h3>
+        <p>No — and yes-ish. The three token-producer paths, pseudo-tokens, and why routing tokens ≠ model tokens.</p>
+        <span class="card-cta">Learn it →</span>
+      </a>
+      <a class="topic-card" href="q4.html" style="--accent:#f472b6">
+        <span class="card-num">QUESTION 04</span>
+        <h3>Prefix State &amp; Restarts</h3>
+        <p>The prefix-to-pod memory EPP keeps, approximate vs. precise mode, and what evaporates when EPP restarts.</p>
+        <span class="card-cta">Learn it →</span>
+      </a>
+      <a class="topic-card" href="q5.html" style="--accent:#fbbf24">
+        <span class="card-num">QUESTION 05</span>
+        <h3>Prefill/Decode Disaggregation</h3>
+        <p>Why decode is picked first, how prefix evidence drives the split decision, and who actually moves the KV bytes.</p>
+        <span class="card-cta">Learn it →</span>
+      </a>
+      <a class="topic-card" href="q6.html" style="--accent:#34d399">
+        <span class="card-num">QUESTION 06</span>
+        <h3>Metrics Collection at Scale</h3>
+        <p>Per-request scraping? Never. Background collectors, snapshots, and the math for 100 model servers.</p>
+        <span class="card-cta">Learn it →</span>
+      </a>
+      <a class="topic-card" href="q7.html" style="--accent:#7dd3fc">
+        <span class="card-num">QUESTION 07</span>
+        <h3>vLLM vs. SGLang Agnosticism</h3>
+        <p>Adapter architecture, metric name mapping, and the one place SGLang support is not yet end-to-end.</p>
+        <span class="card-cta">Learn it →</span>
+      </a>
+      <a class="topic-card" href="q8.html" style="--accent:#f87171">
+        <span class="card-num">QUESTION 08</span>
+        <h3>KV-Cache Eviction Events</h3>
+        <p>How EPP learns (or doesn't learn) that a pod threw away cached blocks — ZMQ events, ordering, and loss.</p>
+        <span class="card-cta">Learn it →</span>
+      </a>
+      <a class="topic-card" href="q9.html" style="--accent:#c084fc">
+        <span class="card-num">QUESTION 09</span>
+        <h3>CPU Offloading &amp; LMCache</h3>
+        <p>Tier-aware scoring (GPU 1.0 vs CPU 0.8), how a CPU block location reaches EPP, and the LMCache eviction gap.</p>
+        <span class="card-cta">Learn it →</span>
+      </a>
+      <a class="topic-card" href="q10.html" style="--accent:#fb923c">
+        <span class="card-num">QUESTION 10</span>
+        <h3>Filesystem &amp; Object Tiers</h3>
+        <p>SSD, CephFS, S3-style storage as KV tiers — what EPP can index, the 1.0 fallback trap, and shared-reader blindness.</p>
+        <span class="card-cta">Learn it →</span>
+      </a>
+    </div>
+  </section>
+
+  <!-- ============ GLOSSARY ============ -->
+  <section id="glossary" class="container section reveal">
+    <h2><span class="num">A–Z</span> Vocabulary you'll see everywhere</h2>
+    <div class="glossary">
+      <div class="gloss-item"><div class="term">EPP (Endpoint Picker)</div><div class="def">The routing brain. A service the proxy consults per request; it answers “send this to pod X”. It never proxies the inference bytes itself.</div></div>
+      <div class="gloss-item"><div class="term">ext-proc</div><div class="def">Envoy's External Processing protocol — a gRPC side-channel that lets a proxy pause a request and ask an external service (EPP) what to do.</div></div>
+      <div class="gloss-item"><div class="term">InferencePool</div><div class="def">A Kubernetes CRD that declares “these pods serve this model, and this EPP picks among them”. Configuration, not a runtime hop.</div></div>
+      <div class="gloss-item"><div class="term">KV cache</div><div class="def">Per-token attention state (Key/Value tensors) the model keeps on GPU during generation. Reusing it for a repeated prompt prefix skips expensive prefill work.</div></div>
+      <div class="gloss-item"><div class="term">Prefill / Decode</div><div class="def">Prefill = process the whole prompt in one pass (compute-heavy). Decode = generate tokens one at a time (latency-sensitive). They can run on different pods.</div></div>
+      <div class="gloss-item"><div class="term">Prefix cache hit</div><div class="def">A new request whose prompt starts with bytes a pod has already processed — the pod can reuse its stored KV blocks instead of recomputing.</div></div>
+      <div class="gloss-item"><div class="term">Filter / Scorer / Picker</div><div class="def">EPP's three scheduling plugin types: filters eliminate ineligible pods, scorers rank survivors with weights, a picker chooses the winner.</div></div>
+      <div class="gloss-item"><div class="term">Snapshot</div><div class="def">The freshest metrics EPP holds in memory for one pod (queue depth, KV usage…). Scoring reads snapshots — it never makes live HTTP calls per request.</div></div>
+      <div class="gloss-item"><div class="term">ZMQ KV events</div><div class="def">Messages vLLM can publish (BlockStored / BlockRemoved / AllBlocksCleared) telling EPP how its KV cache changed. Optional, async, lossy.</div></div>
+      <div class="gloss-item"><div class="term">Tier</div><div class="def">Where a KV block physically lives: GPU, CPU RAM, filesystem, or object store. EPP can weight each tier differently when scoring prefix hits.</div></div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    Built as a study companion for llm-d / Gateway API Inference Extension ·
+    verified against <a href="https://github.com/llm-d/llm-d-router">llm-d-router</a> and
+    <a href="https://github.com/kubernetes-sigs/gateway-api-inference-extension">GIE</a> at pinned revisions
+  </div>
+</footer>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

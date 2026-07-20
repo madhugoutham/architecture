@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Q7 · vLLM vs. SGLang Agnosticism — llm-d Visual Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='%232dd4bf'/></svg>">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <a class="brand" href="index.html"><span class="logo-dot"></span> llm-d Visual Guide</a>
+    <div class="pager">
+      <a href="index.html">☰ All topics</a>
+      <a href="q6.html">← Q6</a>
+      <a href="q8.html">Q8 →</a>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="topic-hero reveal">
+    <span class="q-badge">QUESTION 07</span>
+    <h1>Is metrics collection and scoring agnostic to vLLM and SGLang?</h1>
+    <p class="lede">
+      <strong>Short answer:</strong> <em>Engine-adaptable, not engine-independent.</em> EPP polls a common
+      Prometheus-format <code>/metrics</code> path, then maps engine-specific names into shared fields
+      that scorers understand. That works for vLLM <em>and</em> SGLang metrics — but
+      <strong>precise prefix</strong> is a separate boundary: an SGLang event adapter exists, yet the
+      current precise producer hardwires the <strong>vLLM</strong> adapter.
+    </p>
+  </section>
+
+  <section class="section reveal">
+    <div class="analogy">
+      <div class="emoji">🔌</div>
+      <div class="body">
+        <span class="a-title">Analogy: travel adapters</span>
+        Your laptop (the <strong>common scorers</strong>) runs the same software everywhere. Wall plugs
+        differ by country (<strong>vLLM vs. SGLang metric names</strong>), so you use a travel adapter
+        (<strong>(mapping registry)</strong>. That does <em>not</em> mean every country's socket delivers
+        the same wattage — units and freshness can differ. And the fancy "smart home" remote that talks
+        a proprietary protocol (<strong>precise KV events</strong>) might still only ship with the
+        US plug soldered on — even if a UK adapter board exists in the parts bin.
+      </div>
+    </div>
+  </section>
+
+  <section class="section reveal">
+    <h2><span class="num">1</span> Metrics path: label → map → common fields → scorers</h2>
+    <div class="prose">
+      <p>
+        The endpoint label <code>llm-d.ai/engine-type</code> selects which metric name map to use.
+        If the label is missing, EPP falls back to the configured default mapping — convenient, but
+        dangerous if the pod isn't actually that engine.
+      </p>
+    </div>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> Adapter architecture — metrics normalize; precise prefix is a separate lane</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="vLLM SGLang adapter architecture">
+          <defs>
+            <marker id="q7a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-model" x="40" y="40" width="160" height="70" rx="12"/>
+            <text class="t-title" x="120" y="70" text-anchor="middle">vLLM</text>
+            <text class="t-tiny" x="120" y="92" text-anchor="middle">/metrics</text>
+            <rect class="node-box s-model" x="40" y="130" width="160" height="70" rx="12"/>
+            <text class="t-title" x="120" y="160" text-anchor="middle">SGLang</text>
+            <text class="t-tiny" x="120" y="182" text-anchor="middle">/metrics</text>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <path class="edge e-metrics flow" d="M200,75 L280,75 L280,165 L200,165" fill="none"/>
+            <path class="edge e-metrics flow" d="M280,120 L360,120" marker-end="url(#q7a)"/>
+            <rect class="node-box s-epp" x="360" y="80" width="220" height="80" rx="12"/>
+            <text class="t-title" x="470" y="110" text-anchor="middle">engine-type label</text>
+            <text class="t-mono" x="470" y="135" text-anchor="middle">llm-d.ai/engine-type</text>
+          </g>
+
+          <g class="dimmable" data-s="3">
+            <rect class="node-box s-client" x="640" y="30" width="280" height="70" rx="12"/>
+            <text class="t-sub" x="780" y="58" text-anchor="middle">vLLM map</text>
+            <text class="t-tiny" x="780" y="80" text-anchor="middle">num_requests_waiting · kv_cache_usage_perc</text>
+            <rect class="node-box s-client" x="640" y="120" width="280" height="70" rx="12"/>
+            <text class="t-sub" x="780" y="148" text-anchor="middle">SGLang map</text>
+            <text class="t-tiny" x="780" y="170" text-anchor="middle">num_queue_reqs · token_usage</text>
+          </g>
+
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-storage" x="300" y="230" width="360" height="80" rx="12"/>
+            <text class="t-title" x="480" y="260" text-anchor="middle">Common EPP fields</text>
+            <text class="t-tiny" x="480" y="285" text-anchor="middle">queue · running · KV% · cache geometry</text>
+            <path class="edge e-epp flow" d="M480,310 L480,340" marker-end="url(#q7a)"/>
+            <rect class="node-box s-epp" x="340" y="340" width="280" height="50" rx="12"/>
+            <text class="t-title" x="480" y="370" text-anchor="middle">Common scorers</text>
+          </g>
+
+          <g class="dimmable" data-s="5,6">
+            <rect class="zone-box" x="20" y="420" width="920" height="120"/>
+            <text class="t-zone" x="40" y="445">PRECISE PREFIX — separate compatibility boundary</text>
+            <text class="t-sub" x="40" y="475">engine events → adapter → EPP KV index</text>
+            <rect class="node-box s-danger" x="500" y="455" width="400" height="60" rx="10"/>
+            <text class="t-sub" x="700" y="480" text-anchor="middle" fill="#fecaca">precise producer hardwires</text>
+            <text class="t-mono" x="700" y="500" text-anchor="middle">NewVLLMAdapter()</text>
+          </g>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--model)"></i> Engines</span>
+        <span><i style="background:var(--client)"></i> Name maps</span>
+        <span><i style="background:var(--storage)"></i> Common fields</span>
+        <span><i style="background:var(--danger)"></i> Precise hardwire</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"Two lanes: the metrics adapter path (works for both engines) and the precise-prefix event path (currently vLLM-hardwired in the producer)."},
+        {"text":"Both vLLM and SGLang expose Prometheus-text <code>/metrics</code>. EPP uses one common HTTP poller for both."},
+        {"text":"The endpoint's <code>llm-d.ai/engine-type</code> label picks a mapping. Unlabeled pods silently get the default map — wrong fields if the engine doesn't match."},
+        {"text":"vLLM maps <code>vllm:num_requests_waiting</code>, <code>…_running</code>, <code>kv_cache_usage_perc</code>. SGLang maps <code>sglang:num_queue_reqs</code>, <code>…_running_reqs</code>, <code>token_usage</code>. Also: TensorRT-LLM Serve, Triton variants."},
+        {"text":"The extractor publishes <strong>common fields</strong> (queue, running, KV%, cache shape). Scorers never see raw engine metric names — but semantic parity (units, cadence, missing signals) is not automatic."},
+        {"text":"<strong>Precise prefix</strong> is different: events need an engine adapter. An SGLang adapter exists in the repo…"},
+        {"text":"…but the current precise producer constructs <code>engineadapter.NewVLLMAdapter()</code> directly. Metrics support for SGLang ≠ end-to-end precise-prefix support at this revision."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="callout danger">
+      <div class="co-title">⚠ Silent default mapping</div>
+      An unlabeled or mislabeled endpoint can be interpreted with the default engine map. That is
+      operationally convenient and can silently produce missing or wrong fields. Treat engine support
+      as a <strong>capability matrix</strong>, not one Boolean.
+    </div>
+  </section>
+
+  <section class="section reveal">
+    <h2><span class="num">2</span> Capability matrix at the pinned revision</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Capability</th><th>vLLM</th><th>SGLang</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Direct Prometheus polling</td><td class="yes">Supported</td><td class="yes">Supported</td></tr>
+          <tr><td>Built-in queue / running / KV mappings</td><td class="yes">Present</td><td class="yes">Present</td></tr>
+          <tr><td>Common scorer consumption after normalize</td><td class="yes">Supported</td><td class="yes">Supported</td></tr>
+          <tr><td>KV-event adapter code in repo</td><td class="yes">Present</td><td class="yes">Present</td></tr>
+          <tr><td>Adapter selected by current precise producer</td><td class="yes">Yes (hardwired)</td><td class="no">Not by this constructor</td></tr>
+          <tr><td>Exact render / token path shown</td><td class="yes">vLLM HTTP render</td><td class="no">No equivalent proven here</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <p>
+        Before declaring parity, run the same controlled workload on each engine and compare raw metrics,
+        normalized fields, scorer outputs, chosen endpoints, prefix hashes, and event-driven index changes.
+        Token production for precise mode must also align (render path, block size, hash inputs, event schema).
+      </p>
+    </div>
+
+    <div class="takeaways">
+      <h2>Key takeaways</h2>
+      <ul>
+        <li><strong>Adaptable, not independent</strong> — common scorers sit behind engine-specific maps.</li>
+        <li><code>llm-d.ai/engine-type</code> selects the map; missing labels fall back to the default (risky).</li>
+        <li>Normalization proves syntax was parsed — <strong>not</strong> that units and semantics match.</li>
+        <li><strong>Precise prefix is a second boundary</strong> — SGLang adapter exists; producer still hardwires vLLM.</li>
+        <li>Exact-token / render path shown at this revision is <strong>vLLM HTTP render</strong>.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sources reveal">
+    <h2>Verified sources</h2>
+    <ul>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/datalayer/extractor/metrics/mapping_registry.go#L24-L85" target="_blank" rel="noopener">mapping_registry.go — engine-type label + fallback</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/datalayer/extractor/metrics/factories.go#L88-L146" target="_blank" rel="noopener">factories.go — vLLM / SGLang / TRT mappings</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/engineadapter/sglang_adapter.go#L27-L94" target="_blank" rel="noopener">sglang_adapter.go — SGLang event adapter</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/producer.go#L153-L175" target="_blank" rel="noopener">preciseprefixcache/producer.go — NewVLLMAdapter hardwire</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/vllm_http.go#L39-L170" target="_blank" rel="noopener">vllm_http.go — vLLM render token path</a></li>
+    </ul>
+  </section>
+
+  <nav class="footer-nav reveal">
+    <a href="q6.html"><span class="dir">← Previous</span><span class="name">Q6 · Metrics Collection at Scale</span></a>
+    <a class="next" href="q8.html"><span class="dir">Next →</span><span class="name">Q8 · KV-Cache Eviction Events</span></a>
+  </nav>
+</main>
+
+<footer class="site-footer"><div class="container">llm-d Visual Architecture Guide</div></footer>
+<script src="assets/app.js"></script>
+</body>
+</html>

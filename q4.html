@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Q4 · Prefix State &amp; Restarts — llm-d Visual Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='%232dd4bf'/></svg>">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <a class="brand" href="index.html"><span class="logo-dot"></span> llm-d Visual Guide</a>
+    <div class="pager">
+      <a href="index.html">☰ All topics</a>
+      <a href="q3.html">← Q3</a>
+      <a href="q5.html">Q5 →</a>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="topic-hero reveal">
+    <span class="q-badge">QUESTION 04</span>
+    <h1>What prefix-to-pod state does EPP keep, and what happens on restart?</h1>
+    <p class="lede">
+      <strong>Short answer:</strong> EPP is <em>stateful for routing metadata, stateless for the model's
+      data plane</em>. It keeps mappings that answer one question — <em>"which pod probably has the longest
+      reusable prefix?"</em> — populated either from its own routing history (<strong>approximate</strong>)
+      or from engine KV events (<strong>precise</strong>). On restart, those in-memory maps vanish;
+      the GPU KV tensors on the model servers do not. Inference stays correct — only the routing
+      <em>intelligence</em> goes cold and rebuilds slowly.
+    </p>
+  </section>
+
+  <section class="section reveal">
+    <div class="analogy">
+      <div class="emoji">🍽️</div>
+      <div class="body">
+        <span class="a-title">Analogy: the maître d's memory vs. the kitchen's actual food</span>
+        A maître d' remembers regulars: "Table 7's waiter already knows this party's order." That memory
+        makes service faster — but it isn't the food. The <strong>approximate</strong> maître d' remembers
+        only where <em>he</em> seated people (he can be wrong if a party left, or was seated by a colleague
+        he never saw). The <strong>precise</strong> maître d' gets notes from the kitchen every time a dish
+        is prepped or thrown out — better, but only as good as the notes that actually arrive. If the
+        maître d' is replaced overnight, <strong>the kitchen and all its prepped food remain</strong>;
+        the new hire just seats people less cleverly until his memory rebuilds.
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== DIAGRAM 1: approximate vs precise ===== -->
+  <section class="section reveal">
+    <h2><span class="num">1</span> Two ways to remember: approximate vs. precise</h2>
+    <div class="prose">
+      <p>
+        Both modes feed the same consumer — the prefix scorer that weighs locality in the default score
+        (weight 3, from Q2). What differs is the <strong>evidence</strong>. Approximate mode records
+        <em>EPP's own routing decisions</em>. Precise mode builds an index from
+        <em>KV-cache lifecycle events emitted by the engines</em>. Each has a distinct shape, a distinct
+        failure mode, and a distinct restart story.
+      </p>
+    </div>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> Approximate (routing history) vs. precise (KV-event index) — side by side</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 620" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two-column architecture of the approximate and precise prefix state inside EPP">
+          <defs>
+            <marker id="q4a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <!-- incoming keys -->
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-storage" x="355" y="30" width="250" height="55" rx="12"/>
+            <text class="t-title" x="480" y="53" text-anchor="middle">Prefix block keys</text>
+            <text class="t-tiny" x="480" y="73" text-anchor="middle">from the token producer (Q3)</text>
+          </g>
+
+          <!-- LEFT: approximate -->
+          <g class="dimmable" data-s="1,2,3">
+            <rect class="zone-box" x="20" y="110" width="445" height="360"/>
+            <text class="t-zone" x="40" y="138">APPROXIMATE — PROCESS-LOCAL HISTORY</text>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-proxy" x="50" y="160" width="385" height="115" rx="12"/>
+            <text class="t-title" x="242" y="188" text-anchor="middle">Indexer</text>
+            <rect class="inner-box" x="70" y="200" width="345" height="24"/>
+            <text class="t-mono" x="242" y="216" text-anchor="middle">hashToPods map + per-pod bounded LRU</text>
+            <text class="t-tiny" x="242" y="243" text-anchor="middle">owns locking, lookup, update, pod removal</text>
+            <text class="t-tiny" x="242" y="261" text-anchor="middle">lives only inside this EPP process</text>
+          </g>
+
+            <g class="dimmable" data-s="3">
+            <rect class="node-box s-proxy" x="50" y="305" width="385" height="130" rx="12"/>
+            <text class="t-title" x="242" y="333" text-anchor="middle">Updated AFTER selection</text>
+            <text class="t-sub" x="242" y="355" text-anchor="middle">asynchronously records the chosen decode</text>
+            <text class="t-sub" x="242" y="373" text-anchor="middle">(and prefill) endpoint for these keys</text>
+            <text class="t-tiny" x="242" y="398" text-anchor="middle">records the routing DECISION —</text>
+            <text class="t-tiny" x="242" y="414" text-anchor="middle">not engine confirmation that KV was created</text>
+          </g>
+
+          <!-- RIGHT: precise -->
+          <g class="dimmable" data-s="1,4,5,6">
+            <rect class="zone-box" x="495" y="110" width="445" height="360"/>
+            <text class="t-zone" x="515" y="138">PRECISE — KV-EVENT INDEX</text>
+          </g>
+
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-metrics" x="525" y="160" width="385" height="90" rx="12"/>
+            <text class="t-title" x="717" y="188" text-anchor="middle">Indexer + tier-aware scorer</text>
+            <text class="t-sub" x="717" y="210" text-anchor="middle">block key → pod + tier (GPU / CPU …)</text>
+            <text class="t-tiny" x="717" y="233" text-anchor="middle">default backend: in-memory · Redis optional</text>
+          </g>
+
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-metrics" x="525" y="275" width="385" height="80" rx="12"/>
+            <text class="t-title" x="717" y="303" text-anchor="middle">KV-event pool</text>
+            <text class="t-sub" x="717" y="325" text-anchor="middle">shards by pod → same-pod order preserved</text>
+            <text class="t-tiny" x="717" y="344" text-anchor="middle">workers apply events to the index</text>
+          </g>
+
+          <g class="dimmable" data-s="6">
+            <rect class="node-box s-model" x="525" y="380" width="385" height="55" rx="12"/>
+            <text class="t-title" x="717" y="403" text-anchor="middle">ZMQ subscribers ← engine events</text>
+            <text class="t-mono" x="717" y="424" text-anchor="middle">BlockStored · BlockRemoved · AllBlocksCleared</text>
+          </g>
+
+          <!-- shared consumer -->
+          <g class="dimmable" data-s="1,2,4">
+            <rect class="node-box s-epp" x="305" y="510" width="350" height="80" rx="12"/>
+            <text class="t-title" x="480" y="538" text-anchor="middle">Per-endpoint prefix evidence</text>
+            <text class="t-sub" x="480" y="560" text-anchor="middle">consumed by the prefix scorer (weight 3)</text>
+            <text class="t-tiny" x="480" y="578" text-anchor="middle">a locality prediction — not a reservation</text>
+          </g>
+
+          <!-- edges -->
+          <path class="edge e-storage flow dimmable" data-s="2" d="M400,85 C310,110 270,130 245,160" marker-end="url(#q4a)"/>
+          <path class="edge e-storage flow dimmable" data-s="4" d="M560,85 C650,110 690,130 715,160" marker-end="url(#q4a)"/>
+          <path class="edge e-proxy flow dimmable" data-s="3" d="M242,275 L242,305" marker-end="url(#q4a)"/>
+          <text class="t-label dimmable" data-s="3" x="270" y="295">writes back</text>
+          <path class="edge e-model flow dimmable" data-s="5" d="M717,380 L717,355" marker-end="url(#q4a)"/>
+          <path class="edge e-metrics flow dimmable" data-s="5" d="M717,275 L717,250" marker-end="url(#q4a)"/>
+          <path class="edge e-proxy flow dimmable" data-s="2" d="M242,435 C242,490 330,505 360,515" marker-end="url(#q4a)"/>
+          <path class="edge e-metrics flow dimmable" data-s="4" d="M717,435 C717,490 630,505 600,515" marker-end="url(#q4a)"/>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--proxy)"></i> Approximate state</span>
+        <span><i style="background:var(--metrics)"></i> Precise state</span>
+        <span><i style="background:var(--model)"></i> Engine events</span>
+        <span><i style="background:var(--storage)"></i> Prefix keys</span>
+        <span><i style="background:var(--epp)"></i> Scorer input</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"Same input (prefix block keys), same output (per-endpoint prefix evidence for the scorer) — but two completely different memories in between. Left: what EPP <em>did</em>. Right: what the engines <em>said</em>."},
+        {"text":"<strong>Approximate structure.</strong> A process-local <code>hashToPods</code> map paired with one bounded LRU per pod. The indexer owns the maps, locking, lookups, updates, and pod removal. Before scheduling, the producer computes each candidate's match from this history."},
+        {"text":"<strong>Approximate updates happen AFTER selection</strong> — asynchronously recording the chosen decode (and, when present, prefill) endpoint. That's a routing <em>decision</em>, not an engine acknowledgement: it can be optimistic (request failed before KV creation, or the block got evicted), and it misses residency created via <em>other</em> EPP replicas or direct routes. LRU eviction is also not synchronized with engine cache eviction."},
+        {"text":"<strong>Precise structure.</strong> The producer creates an indexer, a tier-aware scorer, a KV-event pool, and event subscribers as plugin-lifetime objects. The default index backend is <strong>in-memory</strong>; cost-aware memory and Redis are optional configuration choices. \"Global index\" means one index can cover many endpoints — not that replicas share a durable, consistent database."},
+        {"text":"<strong>The event pool preserves per-pod order.</strong> Messages from the same pod hash to the same worker queue, so events for one pod apply in received order. <code>BlockStored</code> adds a pod+tier location; <code>BlockRemoved</code> deletes the matching pod/tier/group entry; <code>AllBlocksCleared</code> wipes <em>every tier</em> for that pod — even if a future event names a tier, tier-scoped clear is unsupported at this revision."},
+        {"text":"<strong>ZMQ is the weak link.</strong> The subscriber receives topic, sequence number, and payload, and reconnects after errors — but this path has <strong>no durable log, no gap detection, no replay</strong>. Same-pod ordering preserves the order of messages that <em>arrived</em>; it cannot resurrect a store or eviction that never did. The index is a derived view of the events one replica received."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="callout info">
+      <div class="co-title">ⓘ Evidence, not truth</div>
+      Approximate mode answers <em>"where did I route this prefix before?"</em> Precise mode answers
+      <em>"where do the events I received say compatible blocks live?"</em> Both are predictions.
+      Precise needs stronger compatibility (Q3's contract) and is still bounded by event loss, late joins,
+      engine eviction, and changes after the scheduling decision. Neither is a reservation.
+    </div>
+  </section>
+
+  <!-- ===== DIAGRAM 2: restart timeline ===== -->
+  <section class="section reveal">
+    <h2><span class="num">2</span> The restart story: what dies, what survives, what rebuilds</h2>
+    <div class="prose">
+      <p>
+        Here's the moment that makes the stateful/stateless distinction concrete. Kill an EPP pod and
+        watch what happens to each kind of state. The punchline: <strong>inference correctness is never
+        tied to EPP metadata survival</strong> — but routing quality dips until the memory rebuilds.
+      </p>
+    </div>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> Timeline of an EPP restart — warm → gone → rebuilding → reconverged</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Timeline showing EPP state before restart, at restart, during rebuild, and after reconvergence">
+          <defs>
+            <marker id="q4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <!-- timeline axis -->
+          <g class="dimmable" data-s="1,2,3,4,5">
+            <line x1="60" y1="70" x2="900" y2="70" stroke="rgba(148,163,184,0.4)" stroke-width="1.6"/>
+            <circle class="f-epp" cx="130" cy="70" r="6"/>
+            <circle class="f-danger" cx="370" cy="70" r="6"/>
+            <circle class="f-model" cx="610" cy="70" r="6"/>
+            <circle class="f-storage" cx="850" cy="70" r="6"/>
+            <text class="t-label" x="130" y="50" text-anchor="middle">warm</text>
+            <text class="t-label" x="370" y="50" text-anchor="middle">restart</text>
+            <text class="t-label" x="610" y="50" text-anchor="middle">rebuilding</text>
+            <text class="t-label" x="850" y="50" text-anchor="middle">reconverged</text>
+          </g>
+
+          <!-- phase 1: warm -->
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-epp" x="35" y="105" width="195" height="170" rx="12"/>
+            <text class="t-title" x="132" y="133" text-anchor="middle">EPP (warm)</text>
+            <rect class="inner-box" x="52" y="148" width="160" height="24"/>
+            <text class="t-mono" x="132" y="164" text-anchor="middle">hashToPods: full</text>
+            <rect class="inner-box" x="52" y="180" width="160" height="24"/>
+            <text class="t-mono" x="132" y="196" text-anchor="middle">precise index: full</text>
+            <text class="t-sub" x="132" y="228" text-anchor="middle">good locality picks</text>
+            <text class="t-tiny" x="132" y="250" text-anchor="middle">prefix scorer well informed</text>
+          </g>
+
+          <!-- phase 2: restart -->
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-danger" x="275" y="105" width="195" height="170" rx="12"/>
+            <text class="t-title" x="372" y="133" text-anchor="middle">EPP (restarted)</text>
+            <rect class="inner-box" x="292" y="148" width="160" height="24"/>
+            <text class="t-mono" x="372" y="164" text-anchor="middle">hashToPods: ∅</text>
+            <rect class="inner-box" x="292" y="180" width="160" height="24"/>
+            <text class="t-mono" x="372" y="196" text-anchor="middle">precise index: ∅</text>
+            <text class="t-sub" x="372" y="228" text-anchor="middle">in-memory maps gone</text>
+            <text class="t-tiny" x="372" y="250" text-anchor="middle">missed events are not replayed</text>
+          </g>
+
+          <!-- phase 3: rebuilding -->
+          <g class="dimmable" data-s="3">
+            <rect class="node-box s-model" x="515" y="105" width="195" height="170" rx="12"/>
+            <text class="t-title" x="612" y="133" text-anchor="middle">EPP (rebuilding)</text>
+            <rect class="inner-box" x="532" y="148" width="160" height="24"/>
+            <text class="t-mono" x="612" y="164" text-anchor="middle">hashToPods: filling</text>
+            <rect class="inner-box" x="532" y="180" width="160" height="24"/>
+            <text class="t-mono" x="612" y="196" text-anchor="middle">precise: new events</text>
+            <text class="t-sub" x="612" y="228" text-anchor="middle">worse locality decisions</text>
+            <text class="t-tiny" x="612" y="250" text-anchor="middle">history before restart is lost</text>
+          </g>
+
+          <!-- phase 4: reconverged -->
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-storage" x="755" y="105" width="190" height="170" rx="12"/>
+            <text class="t-title" x="850" y="133" text-anchor="middle">EPP (reconverged)</text>
+            <rect class="inner-box" x="772" y="148" width="156" height="24"/>
+            <text class="t-mono" x="850" y="164" text-anchor="middle">maps useful again</text>
+            <text class="t-sub" x="850" y="200" text-anchor="middle">rebuilt from new routes</text>
+            <text class="t-sub" x="850" y="220" text-anchor="middle">and new events</text>
+            <text class="t-tiny" x="850" y="250" text-anchor="middle">duration is a deployment</text>
+            <text class="t-tiny" x="850" y="264" text-anchor="middle">observation, not a guarantee</text>
+          </g>
+
+          <!-- model server band -->
+          <g class="dimmable" data-s="1,2,3,4,5">
+            <rect class="zone-box" x="35" y="310" width="910" height="120"/>
+            <text class="t-zone" x="55" y="338">MODEL SERVERS — UNAFFECTED THROUGHOUT</text>
+          </g>
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-model" x="65" y="352" width="850" height="60" rx="12"/>
+            <text class="t-title" x="490" y="378" text-anchor="middle">GPU KV tensors survive · prefill and decode keep running · inference correctness unaffected</text>
+            <text class="t-tiny" x="490" y="400" text-anchor="middle">only the routing intelligence went cold — the cache itself never moved</text>
+          </g>
+
+          <!-- redis caveat -->
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-storage" x="35" y="455" width="440" height="85" rx="12"/>
+            <text class="t-title" x="255" y="483" text-anchor="middle">Redis backend (optional)</text>
+            <text class="t-sub" x="255" y="505" text-anchor="middle">index entries survive the process…</text>
+            <text class="t-tiny" x="255" y="526" text-anchor="middle">subject to Redis's own deployment and retention</text>
+          </g>
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-danger" x="505" y="455" width="440" height="85" rx="12"/>
+            <text class="t-title" x="725" y="483" text-anchor="middle">…but can preserve STALE data</text>
+            <text class="t-sub" x="725" y="505" text-anchor="middle">durable index + lossy event stream</text>
+            <text class="t-tiny" x="725" y="526" text-anchor="middle">missed removals are not repaired by persistence</text>
+          </g>
+          <path class="edge e-danger flow dimmable" data-s="5" d="M475,497 L505,497" marker-end="url(#q4b)"/>
+
+          <!-- phase arrows -->
+          <path class="edge e-danger flow dimmable" data-s="2" d="M230,190 L275,190" marker-end="url(#q4b)"/>
+          <path class="edge e-model flow dimmable" data-s="3" d="M470,190 L515,190" marker-end="url(#q4b)"/>
+          <path class="edge e-storage flow dimmable" data-s="4" d="M710,190 L755,190" marker-end="url(#q4b)"/>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--epp)"></i> Warm state</span>
+        <span><i style="background:var(--danger)"></i> Lost / stale risk</span>
+        <span><i style="background:var(--model)"></i> Rebuilding / model server</span>
+        <span><i style="background:var(--storage)"></i> Recovered / durable</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"Four phases of an EPP restart, left to right — with the model-server band underneath staying green the whole time. That contrast <em>is</em> the answer to this question."},
+        {"text":"<strong>Warm.</strong> The approximate map and precise index are full. The prefix scorer is well informed, and locality-aware picks routinely skip redundant prefill work."},
+        {"text":"<strong>Restart.</strong> The process dies; the approximate map and the default precise in-memory index vanish instantly. Any events published while EPP was down are simply gone — the ZMQ path has no replay. Meanwhile, look down: <strong>every GPU KV tensor is still exactly where it was.</strong> No inference breaks."},
+        {"text":"<strong>Rebuilding.</strong> The restarted EPP starts from empty: approximate state refills from newly selected routes, precise state from newly received events (plus any configured speculative updates). Until then it makes worse locality decisions — cache hits that exist go unfound. Pre-restart history is not recovered."},
+        {"text":"<strong>Reconverged.</strong> Eventually the maps are useful again. How long that takes, and how complete it is, are <em>deployment observations, not fixed guarantees</em> — they depend on traffic, event volume, and configuration."},
+        {"text":"<strong>The Redis caveat.</strong> An optional Redis backend changes only one part of this story: index entries can outlive the process. But a durable index fed by a lossy stream can preserve <em>stale</em> data — a missed <code>BlockRemoved</code> stays missed. Correct recovery would need a proven snapshot, replay, or reconciliation contract, not just persistence."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>State</th><th>Where it lives</th><th>Survives EPP restart?</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Approximate <code>hashToPods</code> + per-pod LRUs</td>
+            <td>EPP process memory</td>
+            <td class="no">No — rebuilds from new routing decisions</td>
+          </tr>
+          <tr>
+            <td>Precise index (default backend)</td>
+            <td>EPP process memory</td>
+            <td class="no">No — rebuilds from new KV events</td>
+          </tr>
+          <tr>
+            <td>Precise index (Redis backend)</td>
+            <td>External Redis</td>
+            <td class="yes">Entries persist — but may be stale; missed events aren't replayed</td>
+          </tr>
+          <tr>
+            <td>KV tensors, model weights, prefill/decode</td>
+            <td>Model server GPUs</td>
+            <td class="yes">Yes — completely unaffected by EPP's lifecycle</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout warn">
+      <div class="co-title">⚠ Replicas can disagree</div>
+      Every EPP replica builds its own view. Approximate replicas see different routing histories;
+      precise replicas can join at different times or miss different events. A warm non-leader datastore
+      or an external index can reduce cold-start cost, but <strong>neither by itself proves identical
+      state</strong> across replicas. After a restart or disconnect, recovery can come from future events,
+      preserved storage, or speculative history — a true snapshot/replay mechanism helps only when it's
+      actually present and verified.
+    </div>
+
+    <ol class="steps-list">
+      <li><strong>Approximate is a bet on your own past.</strong> Fast and local, but blind to evictions, failures after selection, and anything other replicas did.</li>
+      <li><strong>Precise is a bet on the event stream.</strong> More accurate while events flow, but only as complete as what one replica actually received over ZMQ.</li>
+      <li><strong>Restart resets the bet, not the cache.</strong> The engine's KV tensors are untouched; only EPP's knowledge of them must be re-earned.</li>
+    </ol>
+  </section>
+
+  <section class="section reveal">
+    <div class="takeaways">
+      <h2>Key takeaways</h2>
+      <ul>
+        <li><strong>EPP is stateful for routing metadata, stateless for the model data plane.</strong> No weights, no KV bytes, no authoritative conversation state.</li>
+        <li><strong>Approximate mode</strong> = process-local <code>hashToPods</code> + per-pod bounded LRU, updated <em>after</em> selection — it records decisions, not engine confirmations, and can be optimistic or miss other replicas' residency.</li>
+        <li><strong>Precise mode</strong> = indexer + tier-aware scorer + KV-event pool + subscribers; default backend is in-memory, Redis optional. Events: <code>BlockStored</code>, <code>BlockRemoved</code>, <code>AllBlocksCleared</code> (pod-wide, all tiers).</li>
+        <li><strong>The event pool shards by pod</strong>, so same-pod order is preserved — but ZMQ has no durable log, gap detection, or replay in the inspected path.</li>
+        <li><strong>On restart: in-memory maps vanish, GPU KV tensors survive, inference stays correct</strong> — locality knowledge rebuilds slowly from new routes and events.</li>
+        <li><strong>Redis persists entries but can persist stale ones</strong> (durable index + lossy stream), and replicas can legitimately disagree.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sources reveal">
+    <h2>Verified sources</h2>
+    <ul>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/indexer.go#L30-L118" target="_blank" rel="noopener">indexer.go — approximate index structures (pinned revision)</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/plugin.go#L227-L254" target="_blank" rel="noopener">plugin.go — request-time production from history</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/plugin.go#L256-L288" target="_blank" rel="noopener">plugin.go — post-selection asynchronous update</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/producer.go#L138-L197" target="_blank" rel="noopener">producer.go — precise state construction</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvcache/kvblock/index.go#L29-L97" target="_blank" rel="noopener">index.go — index backend selection (in-memory default, Redis optional)</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/events.go#L20-L126" target="_blank" rel="noopener">events.go — BlockStored / BlockRemoved / AllBlocksCleared schema</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/pool.go#L100-L220" target="_blank" rel="noopener">pool.go — per-pod sharded event dispatch</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/pool.go#L327-L535" target="_blank" rel="noopener">pool.go — store / remove / clear event handlers</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/pool.go#L508-L531" target="_blank" rel="noopener">pool.go — AllBlocksCleared clears all tiers for the pod</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/zmq_subscriber.go#L51-L146" target="_blank" rel="noopener">zmq_subscriber.go — subscriber behavior (no gap detection / replay)</a></li>
+      <li><a href="https://gateway-api-inference-extension.sigs.k8s.io/" target="_blank" rel="noopener">Gateway API Inference Extension — official docs</a></li>
+    </ul>
+  </section>
+
+  <nav class="footer-nav reveal">
+    <a href="q3.html"><span class="dir">← Previous</span><span class="name">Q3 · Does EPP Run a Tokenizer?</span></a>
+    <a class="next" href="q5.html"><span class="dir">Next →</span><span class="name">Q5 · Prefix Matching &amp; P/D Disaggregation</span></a>
+  </nav>
+</main>
+
+<footer class="site-footer"><div class="container">llm-d Visual Architecture Guide</div></footer>
+<script src="assets/app.js"></script>
+</body>
+</html>

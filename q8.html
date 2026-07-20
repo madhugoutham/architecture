@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Q8 · KV-Cache Eviction &amp; How EPP Learns — llm-d Visual Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='%232dd4bf'/></svg>">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <a class="brand" href="index.html"><span class="logo-dot"></span> llm-d Visual Guide</a>
+    <div class="pager">
+      <a href="index.html">☰ All topics</a>
+      <a href="q7.html">← Q7</a>
+      <a href="q9.html">Q9 →</a>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="topic-hero reveal">
+    <span class="q-badge">QUESTION 08</span>
+    <h1>What happens when KV-cache blocks are evicted, and how does EPP learn about it?</h1>
+    <p class="lede">
+      <strong>Short answer:</strong> it depends entirely on the mode. In <strong>approximate mode</strong>,
+      EPP <em>never</em> learns about an individual engine eviction — its index records where requests
+      were <em>routed</em>, not what the engine still holds. In <strong>precise mode</strong>, EPP consumes
+      explicit <code>BlockRemoved</code> and <code>AllBlocksCleared</code> events over ZMQ — but those events
+      are optional, asynchronous, and lossy, and the EPP subscriber does <em>not</em> detect gaps or request
+      replays. "Precise" names the correlation mechanism, <strong>not a consistency guarantee</strong>.
+    </p>
+  </section>
+
+  <section class="section reveal">
+    <div class="analogy">
+      <div class="emoji">📮</div>
+      <div class="body">
+        <span class="a-title">Analogy: the card catalog and the postcards</span>
+        Picture a <strong>library card catalog</strong> that only updates when the librarian mails you a
+        postcard about books that were moved or discarded. If every postcard arrives, your catalog matches
+        the shelves. But the mail is best-effort: the librarian's outbox has a size limit and quietly drops
+        postcards when you're slow to read them — and you never count the stamps to notice one is missing.
+        <strong>Miss a postcard, and your catalog confidently lies.</strong> That is EPP's precise mode.
+        Approximate mode is worse in a different way: it's a diary of where <em>you sent people</em>, and
+        the library never mails you anything at all.
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== SECTION 1: two modes ===== -->
+  <section class="section reveal">
+    <h2><span class="num">1</span> Two modes, two completely different answers</h2>
+    <div class="prose">
+      <p>
+        First, the vocabulary. The <strong>KV cache</strong> is the set of per-token attention tensors a
+        model server keeps on the GPU so it can skip re-computing a prompt prefix.
+        <strong>Eviction</strong> is the engine discarding cached blocks to free memory — a routine,
+        engine-internal event. The question is whether EPP, sitting outside the engine, ever hears about it.
+      </p>
+      <p>
+        <strong>Approximate mode</strong> keeps a process-local map of "prefix → pods I routed it to,"
+        with a bounded LRU (least-recently-used list) per pod. It records a <em>routing decision</em>, not a
+        confirmation from the engine. The engine can evict a block one second later and the routing history
+        will still predict a hit. Entries only age out through EPP's <em>own</em> LRU pressure or when an
+        inactive pod is cleaned up — neither of those is an engine notification.
+      </p>
+      <p>
+        <strong>Precise mode</strong> subscribes to an explicit event stream from the engine:
+        <code>BlockStored</code>, <code>BlockRemoved</code>, and <code>AllBlocksCleared</code>. When a
+        remove event arrives and is applied, the matching index entry is deleted. That is genuinely more
+        accurate — as long as every event is produced, transported, and applied. The rest of this page is
+        about where that chain can break.
+      </p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Question</th><th>Approximate mode</th><th>Precise mode</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>What does the index record?</td>
+            <td>Where EPP <strong>routed</strong> each prefix</td>
+            <td>Where events <strong>report</strong> blocks to live (pod + tier)</td>
+          </tr>
+          <tr>
+            <td>Learns about an engine eviction?</td>
+            <td class="no">Never</td>
+            <td class="yes">Yes — if the BlockRemoved event arrives</td>
+          </tr>
+          <tr>
+            <td>How do entries disappear?</td>
+            <td>EPP's own LRU pressure; inactive-pod cleanup</td>
+            <td>Remove/clear events; index restart</td>
+          </tr>
+          <tr>
+            <td>Failure flavor</td>
+            <td>Optimistic by design — a locality <em>prediction</em></td>
+            <td>Correct for the event prefix received; stale after any loss</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===== SECTION 2: the event pipeline ===== -->
+  <section class="section reveal">
+    <h2><span class="num">2</span> The precise event pipeline, end to end</h2>
+    <p class="prose" style="color:#c3cede">
+      Events travel from the engine to the index through several hand-offs. Each hand-off has its own
+      failure boundary. <strong>ZMQ</strong> here is a lightweight pub/sub messaging library — fast,
+      brokerless, and with no delivery guarantee once its buffers fill.
+    </p>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> From cache mutation to index entry — and the approximate side-lane</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 620" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="KV event pipeline from vLLM to the EPP index">
+          <defs>
+            <marker id="q8a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <!-- vLLM zone -->
+          <g class="dimmable" data-s="1,2">
+            <rect class="zone-box" x="20" y="28" width="920" height="155"/>
+            <text class="t-zone" x="40" y="54">VLLM POD — EVENT PRODUCTION (disabled by default, must be enabled)</text>
+          </g>
+
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-model" x="45" y="72" width="215" height="90" rx="12"/>
+            <text class="t-title" x="152" y="100" text-anchor="middle">Cache mutation</text>
+            <text class="t-sub" x="152" y="120" text-anchor="middle">store · evict · clear-all</text>
+            <text class="t-tiny" x="152" y="140" text-anchor="middle">the engine changes its KV blocks</text>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-model" x="330" y="72" width="215" height="90" rx="12"/>
+            <text class="t-title" x="437" y="100" text-anchor="middle">Event batch</text>
+            <text class="t-sub" x="437" y="120" text-anchor="middle">+ 8-byte sequence number</text>
+            <text class="t-tiny" x="437" y="140" text-anchor="middle">MessagePack encoded</text>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-model" x="615" y="72" width="300" height="90" rx="12"/>
+            <text class="t-title" x="765" y="98" text-anchor="middle">ZMQ PUB socket</text>
+            <text class="t-sub" x="765" y="118" text-anchor="middle">topic | sequence | payload</text>
+            <text class="t-tiny" x="765" y="136" text-anchor="middle">bounded replay buffer + high-water mark</text>
+            <text class="t-tiny" x="765" y="152" text-anchor="middle">slow consumer → events DROPPED</text>
+          </g>
+
+          <path class="edge e-model flow dimmable" data-s="2" d="M260,117 L330,117" marker-end="url(#q8a)"/>
+          <path class="edge e-model flow dimmable" data-s="2" d="M545,117 L615,117" marker-end="url(#q8a)"/>
+
+          <!-- EPP zone -->
+          <g class="dimmable" data-s="3,4,5,6">
+            <rect class="zone-box" x="20" y="215" width="920" height="240"/>
+            <text class="t-zone" x="40" y="241">EPP — PRECISE MODE (consumes only what arrives)</text>
+          </g>
+
+          <path class="edge e-epp flow dimmable" data-s="3" d="M765,162 C765,220 147,205 147,262" marker-end="url(#q8a)"/>
+          <text class="t-label dimmable" data-s="3" x="480" y="210" text-anchor="middle">pub/sub over TCP</text>
+
+          <g class="dimmable" data-s="3">
+            <rect class="node-box s-epp" x="45" y="262" width="205" height="100" rx="12"/>
+            <text class="t-title" x="147" y="288" text-anchor="middle">ZMQ subscriber</text>
+            <text class="t-sub" x="147" y="308" text-anchor="middle">reads 3 frames per message</text>
+            <text class="t-tiny" x="147" y="328" text-anchor="middle">records the sequence number but</text>
+            <text class="t-tiny" x="147" y="343" text-anchor="middle">NO gap detection · NO replay requests</text>
+          </g>
+
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-epp" x="285" y="262" width="185" height="100" rx="12"/>
+            <text class="t-title" x="377" y="292" text-anchor="middle">Shard by pod</text>
+            <text class="t-sub" x="377" y="313" text-anchor="middle">same-pod order kept</text>
+            <text class="t-tiny" x="377" y="333" text-anchor="middle">only for messages that arrived</text>
+          </g>
+
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-epp" x="505" y="248" width="235" height="145" rx="12"/>
+            <text class="t-title" x="622" y="274" text-anchor="middle">Event handlers</text>
+            <rect class="inner-box" x="520" y="286" width="205" height="26"/>
+            <text class="t-mono" x="622" y="303" text-anchor="middle">store → index.Add(pod,tier)</text>
+            <rect class="inner-box" x="520" y="318" width="205" height="26"/>
+            <text class="t-mono" x="622" y="335" text-anchor="middle">remove → evict entry</text>
+            <rect class="inner-box" x="520" y="350" width="205" height="26"/>
+            <text class="t-mono" x="622" y="367" text-anchor="middle">clear → wipe pod, ALL tiers</text>
+          </g>
+
+          <g class="dimmable" data-s="5,6">
+            <rect class="node-box s-epp" x="775" y="262" width="145" height="100" rx="12"/>
+            <text class="t-title" x="847" y="292" text-anchor="middle">KV-block index</text>
+            <text class="t-sub" x="847" y="313" text-anchor="middle">pod + tier + group</text>
+            <text class="t-tiny" x="847" y="333" text-anchor="middle">in-memory by default</text>
+          </g>
+
+          <g class="dimmable" data-s="6">
+            <rect class="node-box s-client" x="760" y="392" width="175" height="48" rx="12"/>
+            <text class="t-sub" x="847" y="412" text-anchor="middle">request-time prefix lookup</text>
+            <text class="t-tiny" x="847" y="430" text-anchor="middle">reads the index as-is</text>
+          </g>
+
+          <path class="edge e-epp flow dimmable" data-s="4" d="M250,312 L285,312" marker-end="url(#q8a)"/>
+          <path class="edge e-epp flow dimmable" data-s="5" d="M470,312 L505,312" marker-end="url(#q8a)"/>
+          <path class="edge e-epp flow dimmable" data-s="5" d="M740,312 L775,312" marker-end="url(#q8a)"/>
+          <path class="edge e-client flow dimmable" data-s="6" d="M847,362 L847,392" marker-end="url(#q8a)"/>
+
+          <!-- approximate lane -->
+          <g class="dimmable" data-s="7">
+            <rect class="zone-box" x="20" y="480" width="920" height="125"/>
+            <text class="t-zone" x="40" y="506">APPROXIMATE MODE — EVICTION IS INVISIBLE</text>
+          </g>
+
+          <g class="dimmable" data-s="7">
+            <rect class="node-box s-neutral" x="45" y="520" width="250" height="70" rx="12"/>
+            <text class="t-title" x="170" y="548" text-anchor="middle">Routing decision</text>
+            <text class="t-tiny" x="170" y="570" text-anchor="middle">"I sent this prefix to pod A"</text>
+          </g>
+
+          <g class="dimmable" data-s="7">
+            <rect class="node-box s-neutral" x="370" y="520" width="260" height="70" rx="12"/>
+            <text class="t-title" x="500" y="548" text-anchor="middle">Local per-pod LRU history</text>
+            <text class="t-tiny" x="500" y="570" text-anchor="middle">ages out by ITS OWN pressure</text>
+          </g>
+
+          <g class="dimmable" data-s="7">
+            <rect class="node-box s-danger" x="705" y="520" width="215" height="70" rx="12"/>
+            <text class="t-title" x="812" y="548" text-anchor="middle">Engine eviction</text>
+            <text class="t-tiny" x="812" y="570" text-anchor="middle">never observed — no events read</text>
+          </g>
+
+          <path class="edge flow dimmable" data-s="7" d="M295,555 L370,555" marker-end="url(#q8a)"/>
+          <path class="edge e-danger dimmable" data-s="7" stroke-dasharray="3 5" d="M705,555 L640,555"/>
+          <line class="dimmable" data-s="7" x1="655" y1="547" x2="671" y2="563" stroke="var(--danger)" stroke-width="2"/>
+          <line class="dimmable" data-s="7" x1="671" y1="547" x2="655" y2="563" stroke="var(--danger)" stroke-width="2"/>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--model)"></i> vLLM (producer)</span>
+        <span><i style="background:var(--epp)"></i> EPP precise path</span>
+        <span><i style="background:var(--client)"></i> Request lookup</span>
+        <span><i style="background:var(--danger)"></i> Never delivered</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"The full journey of a KV-cache event: produced inside a vLLM pod (top), consumed by EPP's precise pipeline (middle) — plus the approximate side-lane (bottom), which never sees any of it."},
+        {"text":"It starts with a <strong>cache mutation</strong>: the engine stores new blocks, evicts old ones, or clears everything. Crucially, vLLM's event configuration is <strong>disabled by default</strong> — with no explicit enablement, nothing on this diagram below the top-left box ever happens."},
+        {"text":"When enabled, mutations are batched with an <strong>8-byte sequence number</strong> and published on a <strong>ZMQ PUB socket</strong> as three frames: topic, sequence, MessagePack payload. vLLM can keep a bounded replay buffer and an optional replay endpoint — but its <strong>high-water mark drops events</strong> when the consumer lags."},
+        {"text":"EPP's <strong>ZMQ subscriber</strong> receives the three frames and records the sequence number. In the inspected code path it does <strong>not compare successive sequence numbers, detect gaps, or call vLLM's replay endpoint</strong>. vLLM's replay capability is therefore NOT an EPP recovery guarantee."},
+        {"text":"Messages are <strong>sharded by publishing pod</strong>, so events from the same pod are applied in the order they were received. That preserves order for what <em>arrives</em> — it cannot reconstruct a store or remove that never arrived."},
+        {"text":"Three <strong>handlers</strong> apply the events: a store adds a pod + tier location to the index; a remove evicts the matching entry; <code>AllBlocksCleared</code> wipes <strong>every tier</strong> for that pod — a tier-scoped clear is unsupported at this revision (the code logs it and clears everything anyway)."},
+        {"text":"The <strong>KV-block index</strong> (in-memory by default) is what the next request's prefix scoring reads. It is a derived view of the events one replica happened to receive — correct for that prefix of events, nothing more."},
+        {"text":"Meanwhile, <strong>approximate mode</strong> lives in a different world entirely: it records routing decisions into a local LRU history. There is <strong>no signal path</strong> from engine eviction to this history — entries fade only under EPP's own LRU pressure or inactive-pod cleanup."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="callout warn">
+      <div class="co-title">⚠ Events are off by default</div>
+      vLLM's KV-event configuration is <strong>disabled by default</strong>. A cluster that never enabled it
+      runs precise mode against an event stream that doesn't exist. Everything on this page about remove
+      events assumes an operator explicitly turned event publishing on.
+    </div>
+
+    <div class="callout info">
+      <div class="co-title">ⓘ There is no MOVED event</div>
+      The EPP event schema is exactly three types: <code>BlockStored</code>, <code>BlockRemoved</code>,
+      <code>AllBlocksCleared</code>. A block moving between tiers (say GPU → CPU) is represented only by
+      whatever store/remove information the engine or connector actually emits — not by a dedicated move event.
+    </div>
+  </section>
+
+  <!-- ===== SECTION 3: the lost postcard ===== -->
+  <section class="section reveal">
+    <h2><span class="num">3</span> When a postcard goes missing: the stale-positive scenario</h2>
+    <p class="prose" style="color:#c3cede">
+      Here's the concrete failure everyone should be able to narrate: a <code>BlockRemoved</code> event is
+      dropped, and EPP routes the next request toward a cache hit that no longer exists.
+    </p>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> One dropped BlockRemoved → one phantom cache hit</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A dropped BlockRemoved event causing a stale routing decision">
+          <defs>
+            <marker id="q8b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <!-- row 1: event path -->
+          <g class="dimmable" data-s="1,2,3">
+            <rect class="node-box s-model" x="45" y="60" width="230" height="120" rx="12"/>
+            <text class="t-title" x="160" y="88" text-anchor="middle">vLLM pod A</text>
+            <text class="t-sub" x="160" y="110" text-anchor="middle">block b17 cached on GPU…</text>
+            <text class="t-tiny" x="160" y="132" text-anchor="middle">…then evicted under memory pressure</text>
+            <text class="t-tiny" x="160" y="150" text-anchor="middle">emits BlockRemoved</text>
+          </g>
+
+          <path class="edge e-storage flow dimmable" data-s="1" d="M275,95 L650,95" marker-end="url(#q8b)"/>
+          <text class="t-tiny dimmable" data-s="1" x="462" y="83" text-anchor="middle">BlockStored (earlier) — delivered</text>
+
+          <path class="edge e-danger flow dimmable" data-s="2,3" d="M275,145 L440,145"/>
+          <line class="dimmable" data-s="3" x1="455" y1="135" x2="475" y2="155" stroke="var(--danger)" stroke-width="2.5"/>
+          <line class="dimmable" data-s="3" x1="475" y1="135" x2="455" y2="155" stroke="var(--danger)" stroke-width="2.5"/>
+          <text class="t-tiny dimmable" data-s="3" x="470" y="185" text-anchor="middle" style="fill:var(--danger)">high-water mark: consumer lagged → BlockRemoved DROPPED</text>
+
+          <g class="dimmable" data-s="1,3,4">
+            <rect class="node-box s-epp" x="650" y="60" width="265" height="120" rx="12"/>
+            <text class="t-title" x="782" y="88" text-anchor="middle">EPP precise index</text>
+            <rect class="inner-box" x="668" y="100" width="229" height="28"/>
+            <text class="t-mono" x="782" y="118" text-anchor="middle">b17 → pod A · gpu</text>
+            <text class="t-tiny" x="782" y="146" text-anchor="middle">created by the earlier BlockStored</text>
+            <text class="t-tiny" x="782" y="164" text-anchor="middle" style="fill:var(--danger)">still here — a STALE POSITIVE</text>
+          </g>
+
+          <!-- link down -->
+          <path class="edge e-epp dimmable" data-s="4" stroke-dasharray="3 5" d="M782,180 C782,235 400,240 400,280" marker-end="url(#q8b)"/>
+          <text class="t-tiny dimmable" data-s="4" x="620" y="240" text-anchor="middle">the stale entry feeds the score</text>
+
+          <!-- row 2: request path -->
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-client" x="45" y="290" width="150" height="80" rx="12"/>
+            <text class="t-title" x="120" y="322" text-anchor="middle">Client</text>
+            <text class="t-tiny" x="120" y="344" text-anchor="middle">same prefix again</text>
+          </g>
+
+          <g class="dimmable" data-s="4,5">
+            <rect class="node-box s-epp" x="270" y="280" width="260" height="100" rx="12"/>
+            <text class="t-title" x="400" y="308" text-anchor="middle">EPP prefix scoring</text>
+            <text class="t-mono" x="400" y="332" text-anchor="middle">lookup(b17) → pod A</text>
+            <text class="t-tiny" x="400" y="356" text-anchor="middle">predicts a hit that no longer exists</text>
+          </g>
+
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-danger" x="650" y="280" width="265" height="100" rx="12"/>
+            <text class="t-title" x="782" y="308" text-anchor="middle">vLLM pod A</text>
+            <text class="t-sub" x="782" y="330" text-anchor="middle">cache MISS on b17</text>
+            <text class="t-tiny" x="782" y="352" text-anchor="middle">full prefill recompute — latency penalty</text>
+          </g>
+
+          <path class="edge e-client flow dimmable" data-s="4" d="M195,330 L270,330" marker-end="url(#q8b)"/>
+          <path class="edge e-danger flow dimmable" data-s="5" d="M530,330 L650,330" marker-end="url(#q8b)"/>
+          <text class="t-tiny dimmable" data-s="5" x="590" y="318" text-anchor="middle">routed for a phantom hit</text>
+
+          <text class="t-tiny dimmable" data-s="5" x="480" y="430" text-anchor="middle">The answer is still correct — the engine simply recomputes. What's lost is the latency win the router promised.</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--model)"></i> vLLM pod</span>
+        <span><i style="background:var(--epp)"></i> EPP</span>
+        <span><i style="background:var(--storage)"></i> Delivered event</span>
+        <span><i style="background:var(--danger)"></i> Dropped event / miss</span>
+        <span><i style="background:var(--client)"></i> Client</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"The \"lost postcard\" scenario end to end: a delivered store, a dropped remove, and the phantom cache hit that follows."},
+        {"text":"Earlier, pod A stored block <code>b17</code> and its <strong>BlockStored event was delivered</strong>. EPP's index now correctly maps b17 → pod A on the gpu tier. So far, so good."},
+        {"text":"Memory pressure hits. The engine <strong>evicts b17</strong> and dutifully emits a <strong>BlockRemoved</strong> event into its ZMQ publisher."},
+        {"text":"But EPP was lagging, and the publisher's <strong>high-water mark drops the message</strong>. The subscriber has no gap detection and never calls the replay endpoint, so the loss is silent. The index entry survives — a <strong>stale positive</strong>."},
+        {"text":"A client sends the same prefix again. EPP's prefix lookup finds b17 → pod A and <strong>scores pod A as a likely hit</strong>. The index has no way to know it's describing the past."},
+        {"text":"The request lands on pod A, which has a <strong>cache miss</strong> and recomputes the full prefill. Correctness is preserved — the engine is the source of truth for execution — but the routing promise was hollow. Nothing repairs this entry except a later event for the same block, an <code>AllBlocksCleared</code> for the pod, or an index restart."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="prose">
+      <p>
+        The full <strong>consistency model</strong> follows directly from "a derived view of received events":
+      </p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>State</th><th>Cause</th><th>Effect on routing</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Stale positive</strong></td>
+            <td>A <code>BlockRemoved</code> was missed</td>
+            <td>EPP predicts hits that miss → wasted locality routing, recompute at the engine</td>
+          </tr>
+          <tr>
+            <td><strong>Stale negative</strong></td>
+            <td>A <code>BlockStored</code> was missed</td>
+            <td>EPP overlooks real residency → misses a locality win it could have had</td>
+          </tr>
+          <tr>
+            <td><strong>Empty</strong></td>
+            <td>EPP restart with the in-memory backend</td>
+            <td>All locality knowledge gone until new events rebuild it</td>
+          </tr>
+          <tr>
+            <td><strong>Replica divergence</strong></td>
+            <td>Replicas subscribed at different times or missed different events</td>
+            <td>Two EPP replicas can score the same request differently</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout danger">
+      <div class="co-title">⚠ Redis does not fix this</div>
+      An optional Redis index backend persists entries across an EPP restart — but persistence cannot
+      <em>repair an event that was never received</em>. A durable index fed by a lossy stream simply preserves
+      possibly-stale data more reliably. Correct recovery would need a proven snapshot, replay, or
+      reconciliation contract, which the inspected path does not implement.
+    </div>
+
+    <div class="callout tip">
+      <div class="co-title">ⓘ What to monitor until a gap/replay contract exists</div>
+      Watch the <strong>event receive rate</strong>, <strong>adapter errors</strong>,
+      <strong>work-queue depth</strong>, <strong>index size</strong>, and <strong>sequence discontinuity</strong>
+      (externally — EPP won't flag it for you). The safe way to describe what precise mode gives you:
+      <em>"event-correlated prefix metadata with defined loss boundaries"</em> — not "instant true cache state."
+    </div>
+  </section>
+
+  <section class="section reveal">
+    <div class="takeaways">
+      <h2>Key takeaways</h2>
+      <ul>
+        <li><strong>Approximate mode never learns about eviction.</strong> It records routing decisions; entries fade only through EPP's own LRU pressure or inactive-pod cleanup.</li>
+        <li><strong>Precise mode consumes BlockStored / BlockRemoved / AllBlocksCleared</strong> — and vLLM event publishing is <strong>disabled by default</strong>.</li>
+        <li>The transport is lossy by design: <strong>ZMQ's high-water mark can drop events</strong>, and EPP's subscriber does <strong>no gap detection and no replay requests</strong> — vLLM's replay endpoint is not an EPP recovery mechanism.</li>
+        <li><strong>AllBlocksCleared wipes every tier for the pod</strong>; tier-scoped clears are unsupported at this revision.</li>
+        <li>The consistency model has four faces: <strong>stale positive, stale negative, empty after restart, replica divergence</strong>. Redis persistence changes none of them — it can preserve stale entries, not replay missed events.</li>
+        <li>Say <strong>"event-correlated prefix metadata with defined loss boundaries,"</strong> never "EPP knows the true cache state."</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sources reveal">
+    <h2>Verified sources</h2>
+    <ul>
+      <li><a href="https://github.com/vllm-project/vllm/blob/ab3c1aedf3b9677c1e43b391478554a4b110419e/vllm/config/kv_events.py#L10-L52" target="_blank" rel="noopener">vLLM kv_events config — publisher, replay endpoint, high-water mark (disabled by default)</a></li>
+      <li><a href="https://github.com/vllm-project/vllm/blob/ab3c1aedf3b9677c1e43b391478554a4b110419e/vllm/distributed/kv_events.py#L25-L115" target="_blank" rel="noopener">vLLM event schema — media and the three event types</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/events.go#L20-L126" target="_blank" rel="noopener">events.go — EPP domain schema: BlockStored / BlockRemoved / AllBlocksCleared</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/zmq_subscriber.go#L51-L146" target="_blank" rel="noopener">zmq_subscriber.go — three frames, sequence recorded, no gap detection or replay</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/pool.go#L100-L220" target="_blank" rel="noopener">pool.go — sharding by publishing pod</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/pool.go#L327-L535" target="_blank" rel="noopener">pool.go — store / remove / clear handlers</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvevents/pool.go#L508-L531" target="_blank" rel="noopener">pool.go — AllBlocksCleared is pod-wide; tier-scoped clear unsupported</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/indexer.go#L30-L118" target="_blank" rel="noopener">approximateprefix/indexer.go — hashToPods map + per-pod LRU</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/plugin.go#L256-L288" target="_blank" rel="noopener">approximateprefix/plugin.go — post-selection recording (a routing decision, not an ack)</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvcache/kvblock/index.go#L29-L97" target="_blank" rel="noopener">kvblock/index.go — index backend selection (in-memory default, optional Redis)</a></li>
+    </ul>
+  </section>
+
+  <nav class="footer-nav reveal">
+    <a href="q7.html"><span class="dir">← Previous</span><span class="name">Q7 · Engine Agnosticism: vLLM vs. SGLang</span></a>
+    <a class="next" href="q9.html"><span class="dir">Next →</span><span class="name">Q9 · CPU Offloading &amp; LMCache</span></a>
+  </nav>
+</main>
+
+<footer class="site-footer"><div class="container">llm-d Visual Architecture Guide</div></footer>
+<script src="assets/app.js"></script>
+</body>
+</html>
