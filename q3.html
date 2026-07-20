@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Q3 · Does EPP Run a Tokenizer? — llm-d Visual Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='%232dd4bf'/></svg>">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <a class="brand" href="index.html"><span class="logo-dot"></span> llm-d Visual Guide</a>
+    <div class="pager">
+      <a href="index.html">☰ All topics</a>
+      <a href="q2.html">← Q2</a>
+      <a href="q4.html">Q4 →</a>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="topic-hero reveal">
+    <span class="q-badge">QUESTION 03</span>
+    <h1>Does EPP run a tokenizer?</h1>
+    <p class="lede">
+      <strong>Short answer:</strong> not the model's tokenizer, no — at least not universally.
+      EPP has a pluggable <em>token producer</em> with three backends: a cheap local
+      <strong>estimate</strong> mode (the default fallback), a request-time <strong>HTTP call to a vLLM
+      render service</strong>, and a deprecated Unix-socket sidecar path. These produce identifiers
+      <em>for routing</em>. The tokenization that actually feeds the model always happens at the
+      <strong>model server</strong>.
+    </p>
+  </section>
+
+  <section class="section reveal">
+    <div class="analogy">
+      <div class="emoji">📮</div>
+      <div class="body">
+        <span class="a-title">Analogy: a mailroom sorting by zip code without reading letters</span>
+        A mailroom doesn't read your letter to route it — it looks at the <strong>zip code</strong> on the
+        envelope and drops it in the right bin. EPP's <strong>estimate mode</strong> is like that: it chops
+        the raw bytes of your prompt into fixed-size chunks and turns them into stable IDs. Two identical
+        envelopes always land in the same bin, which is all routing needs. But the zip code is
+        <em>not the letter's contents</em> — just as pseudo-tokens are <em>not the model's tokens</em>.
+        Only the recipient (the model server) actually opens and reads the letter, with its real tokenizer.
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== DIAGRAM 1: three token-producer backends ===== -->
+  <section class="section reveal">
+    <h2><span class="num">1</span> Three ways EPP gets token IDs for routing</h2>
+    <div class="prose">
+      <p>
+        During request data production (stage 2 of the Director pipeline from Q1), EPP needs token-like
+        identifiers from the prompt so it can compute <strong>prefix block keys</strong> — the lookup keys
+        for "which pod probably has this prefix cached?". The configured <em>token producer</em> supplies
+        them, and it has three backend paths. When neither explicit backend is configured, the factory
+        falls back to <strong>estimate mode</strong>.
+      </p>
+    </div>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> Token producer backends → prefix block keys → two prefix paths</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 620" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Token producer with three backends feeding prefix block keys and the approximate and precise prefix paths">
+          <defs>
+            <marker id="q3a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <!-- request -->
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-client" x="380" y="35" width="200" height="60" rx="12"/>
+            <text class="t-title" x="480" y="60" text-anchor="middle">Incoming request</text>
+            <text class="t-tiny" x="480" y="82" text-anchor="middle">OpenAI-style prompt / chat</text>
+          </g>
+
+          <!-- token producer zone -->
+          <g class="dimmable" data-s="1,2,3,4">
+            <rect class="zone-box" x="20" y="120" width="920" height="215"/>
+            <text class="t-zone" x="40" y="148">CONFIGURED TOKEN PRODUCER — runs inside EPP per request</text>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-epp" x="45" y="170" width="270" height="135" rx="12"/>
+            <text class="t-title" x="180" y="197" text-anchor="middle">Estimate mode</text>
+            <text class="t-sub" x="180" y="219" text-anchor="middle">default fallback · local · zero config</text>
+            <rect class="inner-box" x="65" y="232" width="230" height="24"/>
+            <text class="t-mono" x="180" y="248" text-anchor="middle">4 bytes → 1 pseudo-token ID</text>
+            <text class="t-tiny" x="180" y="275" text-anchor="middle">deterministic and cheap — but these are</text>
+            <text class="t-tiny" x="180" y="291" text-anchor="middle">NOT the model's tokens</text>
+          </g>
+
+          <g class="dimmable" data-s="3">
+            <rect class="node-box s-model" x="350" y="170" width="270" height="135" rx="12"/>
+            <text class="t-title" x="485" y="197" text-anchor="middle">vLLM render call</text>
+            <text class="t-sub" x="485" y="219" text-anchor="middle">HTTP · request-time · external service</text>
+            <rect class="inner-box" x="370" y="232" width="230" height="24"/>
+            <text class="t-mono" x="485" y="248" text-anchor="middle">completion / chat render endpoint</text>
+            <text class="t-tiny" x="485" y="275" text-anchor="middle">model-compatible token data —</text>
+            <text class="t-tiny" x="485" y="291" text-anchor="middle">but a network hop on the request path</text>
+          </g>
+
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-danger" x="655" y="170" width="260" height="135" rx="12"/>
+            <text class="t-title" x="785" y="197" text-anchor="middle">UDS sidecar</text>
+            <text class="t-sub" x="785" y="219" text-anchor="middle">Unix domain socket</text>
+            <rect class="inner-box" x="675" y="232" width="220" height="24"/>
+            <text class="t-mono" x="785" y="248" text-anchor="middle">DEPRECATED</text>
+            <text class="t-tiny" x="785" y="275" text-anchor="middle">legacy path — kept for reference,</text>
+            <text class="t-tiny" x="785" y="291" text-anchor="middle">not the way forward</text>
+          </g>
+
+          <!-- token IDs -->
+          <g class="dimmable" data-s="2,3,4,5">
+            <rect class="node-box s-epp" x="330" y="365" width="300" height="55" rx="12"/>
+            <text class="t-title" x="480" y="388" text-anchor="middle">Routing token IDs</text>
+            <text class="t-tiny" x="480" y="408" text-anchor="middle">exact or pseudo, depending on backend</text>
+          </g>
+
+          <!-- block keys -->
+          <g class="dimmable" data-s="5,6,7">
+            <rect class="node-box s-storage" x="330" y="450" width="300" height="55" rx="12"/>
+            <text class="t-title" x="480" y="473" text-anchor="middle">Prefix block keys</text>
+            <text class="t-tiny" x="480" y="493" text-anchor="middle">chained hashes over token blocks</text>
+          </g>
+
+          <!-- two consumers -->
+          <g class="dimmable" data-s="6">
+            <rect class="node-box s-proxy" x="60" y="535" width="360" height="70" rx="12"/>
+            <text class="t-title" x="240" y="562" text-anchor="middle">Approximate prefix path</text>
+            <text class="t-sub" x="240" y="584" text-anchor="middle">"where did EPP route this prefix before?" (Q4)</text>
+          </g>
+          <g class="dimmable" data-s="7">
+            <rect class="node-box s-metrics" x="540" y="535" width="360" height="70" rx="12"/>
+            <text class="t-title" x="720" y="562" text-anchor="middle">Precise prefix path</text>
+            <text class="t-sub" x="720" y="584" text-anchor="middle">"where do KV events say blocks live?" (Q4)</text>
+          </g>
+
+          <!-- edges: request -> backends -->
+          <path class="edge e-client flow dimmable" data-s="2" d="M410,95 C300,120 220,140 190,170" marker-end="url(#q3a)"/>
+          <path class="edge e-client flow dimmable" data-s="3" d="M480,95 L485,170" marker-end="url(#q3a)"/>
+          <path class="edge e-client flow dimmable" data-s="4" d="M550,95 C660,120 740,140 775,170" marker-end="url(#q3a)"/>
+
+          <!-- edges: backends -> token IDs -->
+          <path class="edge e-epp flow dimmable" data-s="2" d="M180,305 C180,345 280,370 330,380" marker-end="url(#q3a)"/>
+          <path class="edge e-model flow dimmable" data-s="3" d="M485,305 L481,365" marker-end="url(#q3a)"/>
+          <path class="edge e-danger dimmable" data-s="4" stroke-dasharray="3 5" d="M785,305 C785,345 680,370 630,380" marker-end="url(#q3a)"/>
+
+          <!-- token IDs -> keys -->
+          <path class="edge e-storage flow dimmable" data-s="5" d="M480,420 L480,450" marker-end="url(#q3a)"/>
+
+          <!-- keys -> consumers -->
+          <path class="edge e-proxy flow dimmable" data-s="6" d="M355,505 C300,515 270,522 250,535" marker-end="url(#q3a)"/>
+          <path class="edge e-metrics flow dimmable" data-s="7" d="M605,505 C660,515 690,522 710,535" marker-end="url(#q3a)"/>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--client)"></i> Request</span>
+        <span><i style="background:var(--epp)"></i> Estimate (in EPP)</span>
+        <span><i style="background:var(--model)"></i> vLLM render (external)</span>
+        <span><i style="background:var(--danger)"></i> Deprecated</span>
+        <span><i style="background:var(--proxy)"></i> Approximate path</span>
+        <span><i style="background:var(--metrics)"></i> Precise path</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"The whole flow: a request enters, one of <strong>three token-producer backends</strong> turns the prompt into routing token IDs, those become <strong>prefix block keys</strong>, and two different prefix paths consume them. None of this touches the model's execution tokenization."},
+        {"text":"<strong>Estimate mode — the default fallback.</strong> No Hugging Face tokenizer, no model vocabulary. It consumes the input bytes four at a time and packs each group into a deterministic pseudo-token ID. Cheap, stable, local — and explicitly <em>not</em> the token boundaries vLLM will use."},
+        {"text":"<strong>vLLM render mode.</strong> EPP picks the completion or chat render endpoint based on the request form and makes a <em>request-time HTTP call</em> to a configured vLLM render service, getting model-compatible token data back. The cost: a network dependency on the hot path. And there is <strong>no automatic fallback</strong> to estimate mode if the call fails."},
+        {"text":"<strong>The UDS sidecar path is deprecated.</strong> It exists in the code, but it's the legacy way to get external tokenization and isn't the direction the project is moving."},
+        {"text":"Whichever backend ran, the output is <strong>routing token IDs</strong> — exact (render) or pseudo (estimate) — which get chained into <strong>prefix block keys</strong>: the hashes used to look up cached-prefix locations."},
+        {"text":"The <strong>approximate path</strong> asks: where did EPP route this same derived prefix before? Pseudo-tokens work fine here — repeated byte-identical input produces the same identifiers, so history lookups still hit."},
+        {"text":"The <strong>precise path</strong> asks: which pods does the KV-event-built index associate with compatible block keys? This needs much stronger compatibility (next section) — and note: the precise producer <em>requires token data from an upstream producer</em>. It has no hidden tokenizer of its own."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="callout danger">
+      <div class="co-title">✕ No silent rescue on render failure</div>
+      The backend-selection code does <strong>not</strong> implement an automatic fallback from a failed
+      HTTP render call to estimate mode. A slow, unavailable, or incompatible render service affects
+      <em>that request's</em> EPP processing directly — it's request data production, not a background
+      metrics poll that can quietly go stale.
+    </div>
+
+    <div class="callout info">
+      <div class="co-title">ⓘ Render ≠ metrics collection</div>
+      Don't confuse the render call with the metric collectors from Q2. Collectors poll
+      <code>/metrics</code> on a timer in the background; the render call runs <em>inside</em> a request's
+      data-production stage because the prefix plugins need its output for the current scheduling decision.
+      Different loop, different failure blast radius.
+    </div>
+  </section>
+
+  <!-- ===== DIAGRAM 2: routing vs execution tokens ===== -->
+  <section class="section reveal">
+    <h2><span class="num">2</span> Routing tokens vs. execution tokens: who owns what</h2>
+    <div class="prose">
+      <p>
+        The word "tokenizer" hides two different jobs. <strong>Routing tokenization</strong> only needs
+        stable identifiers so prefix lookups group identical inputs. <strong>Execution tokenization</strong>
+        must produce the exact token sequence the model computes over — and that always belongs to the
+        model server, regardless of which token producer EPP runs.
+      </p>
+      <p>
+        This is also why "precise prefix" is often misread. <em>Precise</em> describes the
+        <strong>event-backed lookup</strong> — routing keys correlated with KV-cache state reported by
+        engine events — not a secret model tokenizer inside EPP. In fact, the current precise producer
+        <em>rejects</em> its former internal tokenizer configuration and demands token data from an
+        upstream producer.
+      </p>
+    </div>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> Two tokenizations, two owners — and the compatibility contract between them</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Side-by-side comparison of routing tokens owned by EPP and execution tokens owned by the model server">
+          <defs>
+            <marker id="q3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <!-- prompt at top -->
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-client" x="355" y="30" width="250" height="55" rx="12"/>
+            <text class="t-title" x="480" y="53" text-anchor="middle">Same prompt</text>
+            <text class="t-tiny" x="480" y="73" text-anchor="middle">travels down both columns</text>
+          </g>
+
+          <!-- left column: EPP routing -->
+          <g class="dimmable" data-s="1,2,4">
+            <rect class="zone-box" x="20" y="110" width="440" height="300"/>
+            <text class="t-zone" x="40" y="138">EPP — ROUTING TOKENS</text>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-epp" x="50" y="160" width="380" height="100" rx="12"/>
+            <text class="t-title" x="240" y="188" text-anchor="middle">Token producer output</text>
+            <text class="t-sub" x="240" y="210" text-anchor="middle">pseudo-token IDs (estimate) or</text>
+            <text class="t-sub" x="240" y="228" text-anchor="middle">rendered token data (vLLM render call)</text>
+            <text class="t-tiny" x="240" y="250" text-anchor="middle">purpose: stable grouping for prefix lookup</text>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-storage" x="50" y="290" width="380" height="90" rx="12"/>
+            <text class="t-title" x="240" y="318" text-anchor="middle">Prefix block keys → index lookup</text>
+            <text class="t-sub" x="240" y="340" text-anchor="middle">request-scoped data for prefix scorers</text>
+            <text class="t-tiny" x="240" y="362" text-anchor="middle">never stores KV bytes, never executes prompt work</text>
+          </g>
+
+          <!-- right column: model server -->
+          <g class="dimmable" data-s="1,3,4">
+            <rect class="zone-box" x="500" y="110" width="440" height="300"/>
+            <text class="t-zone" x="520" y="138">MODEL SERVER — EXECUTION TOKENS</text>
+          </g>
+
+          <g class="dimmable" data-s="3">
+            <rect class="node-box s-model" x="530" y="160" width="380" height="100" rx="12"/>
+            <text class="t-title" x="720" y="188" text-anchor="middle">Real tokenizer + chat template</text>
+            <text class="t-sub" x="720" y="210" text-anchor="middle">the model's vocabulary, the model's boundaries</text>
+            <text class="t-tiny" x="720" y="235" text-anchor="middle">authoritative — this is what actually gets computed</text>
+          </g>
+
+          <g class="dimmable" data-s="3">
+            <rect class="node-box s-model" x="530" y="290" width="380" height="90" rx="12"/>
+            <text class="t-title" x="720" y="318" text-anchor="middle">Prefill · decode · KV blocks</text>
+            <text class="t-sub" x="720" y="340" text-anchor="middle">KV tensors created and evicted here</text>
+            <text class="t-tiny" x="720" y="362" text-anchor="middle">emits KV events in precise deployments (Q4)</text>
+          </g>
+
+          <!-- compatibility bridge -->
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-danger" x="170" y="440" width="620" height="80" rx="12"/>
+            <text class="t-title" x="480" y="468" text-anchor="middle">Compatibility contract — must align, or KV reuse is silently missed</text>
+            <text class="t-mono" x="480" y="492" text-anchor="middle">token IDs · model identity · block size · hash inputs · event metadata</text>
+          </g>
+
+          <!-- edges -->
+          <path class="edge e-client flow dimmable" data-s="2" d="M400,85 C320,110 270,130 245,160" marker-end="url(#q3b)"/>
+          <path class="edge e-client flow dimmable" data-s="3" d="M560,85 C640,110 690,130 715,160" marker-end="url(#q3b)"/>
+          <path class="edge e-epp flow dimmable" data-s="2" d="M240,260 L240,290" marker-end="url(#q3b)"/>
+          <path class="edge e-model flow dimmable" data-s="3" d="M720,260 L720,290" marker-end="url(#q3b)"/>
+          <path class="edge e-danger flow dimmable" data-s="4" d="M240,380 C240,420 290,435 330,443" marker-end="url(#q3b)"/>
+          <path class="edge e-danger flow dimmable" data-s="4" d="M720,380 C720,420 670,435 630,443" marker-end="url(#q3b)"/>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--epp)"></i> EPP routing side</span>
+        <span><i style="background:var(--model)"></i> Model server side</span>
+        <span><i style="background:var(--storage)"></i> Prefix keys</span>
+        <span><i style="background:var(--danger)"></i> Compatibility boundary</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"One prompt, two independent tokenizations. The left column is what EPP derives <em>for routing</em>; the right column is what the model server computes <em>for execution</em>. They can agree — but nothing forces them to."},
+        {"text":"<strong>EPP's side is metadata.</strong> The token producer emits routing IDs, which become prefix block keys, which drive index lookups and scores. This output is request-scoped: it never stores KV bytes and never executes any prompt work."},
+        {"text":"<strong>The model server's side is authoritative.</strong> Its own tokenizer and chat template produce the exact sequence that prefill and decode compute over, and the KV blocks are created (and evicted) here. An estimate-derived key is not guaranteed to equal a key derived from vLLM's tokenizer."},
+        {"text":"<strong>The precise path lives or dies on this contract.</strong> Rendered token IDs, model identity, block size, hash inputs, and event metadata must all align between the request side and the event adapter's block identity. A mismatch leaves reusable KV data resident at the engine while EPP finds no compatible routing key — a silent cache miss. \"Precise\" names the event-backed lookup; it does not waive these requirements."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Aspect</th><th>Estimate mode</th><th>vLLM render mode</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Where it runs</td>
+            <td>Inside EPP, local</td>
+            <td>External vLLM render service, HTTP</td>
+          </tr>
+          <tr>
+            <td>Configuration</td>
+            <td>Zero-config default fallback</td>
+            <td>Explicitly configured endpoint</td>
+          </tr>
+          <tr>
+            <td>Output</td>
+            <td>Deterministic pseudo-token IDs (4 bytes each)</td>
+            <td>Model-compatible rendered token data</td>
+          </tr>
+          <tr>
+            <td>Matches the model's tokens?</td>
+            <td class="no">No — not the model's boundaries</td>
+            <td class="yes">Can, when model/template align</td>
+          </tr>
+          <tr>
+            <td>Request-path dependency</td>
+            <td class="yes">None beyond EPP itself</td>
+            <td class="no">Network call: latency, timeout, availability</td>
+          </tr>
+          <tr>
+            <td>Good enough for…</td>
+            <td>Approximate routing history</td>
+            <td>Precise event-index correlation</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout warn">
+      <div class="co-title">⚠ Deployment-specific, not guaranteed</div>
+      The render service's latency, timeout, availability, and model/template alignment are all
+      <strong>deployment parameters</strong>, not code guarantees. A deployment <em>can</em> depend on exact
+      model tokenization through an external or legacy producer — but the default estimate path and the
+      precise plugin do not embed that tokenizer inside EPP.
+    </div>
+  </section>
+
+  <section class="section reveal">
+    <div class="takeaways">
+      <h2>Key takeaways</h2>
+      <ul>
+        <li><strong>EPP does not universally embed the model's tokenizer.</strong> It runs a token <em>producer</em> whose default fallback packs input bytes 4-at-a-time into deterministic pseudo-token IDs.</li>
+        <li><strong>Estimate tokens are stable, cheap — and not the model's tokens.</strong> An estimate-derived key isn't guaranteed to match a key from vLLM's tokenizer.</li>
+        <li>The <strong>vLLM render backend</strong> gets model-compatible token data via a request-time HTTP call — adding a network dependency on the hot path, with <strong>no automatic fallback</strong> to estimate on failure.</li>
+        <li><strong>The model server always owns execution tokenization.</strong> Routing tokens are metadata; execution tokens are what actually gets computed.</li>
+        <li><strong>"Precise" means event-backed lookup, not a hidden tokenizer.</strong> The precise producer requires token data from an upstream producer.</li>
+        <li><strong>Compatibility is a contract:</strong> token IDs, model identity, block size, hash inputs, and event metadata must align — or KV reuse is silently missed.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sources reveal">
+    <h2>Verified sources</h2>
+    <ul>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/tokenizer.go#L42-L81" target="_blank" rel="noopener">tokenizer.go — backend selection and validation (pinned revision)</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/tokenizer.go#L122-L208" target="_blank" rel="noopener">tokenizer.go — factory behavior (estimate as fallback)</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/estimate.go#L33-L90" target="_blank" rel="noopener">estimate.go — 4-bytes-per-pseudo-token algorithm</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/vllm_http.go#L39-L76" target="_blank" rel="noopener">vllm_http.go — HTTP renderer setup</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/vllm_http.go#L100-L170" target="_blank" rel="noopener">vllm_http.go — render request and response handling</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/producer.go#L101-L135" target="_blank" rel="noopener">producer.go — precise-producer factory guard (rejects internal tokenizer config)</a></li>
+      <li><a href="https://gateway-api-inference-extension.sigs.k8s.io/" target="_blank" rel="noopener">Gateway API Inference Extension — official docs</a></li>
+    </ul>
+  </section>
+
+  <nav class="footer-nav reveal">
+    <a href="q2.html"><span class="dir">← Previous</span><span class="name">Q2 · Metrics: Collected vs. Scored</span></a>
+    <a class="next" href="q4.html"><span class="dir">Next →</span><span class="name">Q4 · Prefix State &amp; Restarts</span></a>
+  </nav>
+</main>
+
+<footer class="site-footer"><div class="container">llm-d Visual Architecture Guide</div></footer>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Q10 · Filesystem &amp; Object-Store Tiers — llm-d Visual Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='%232dd4bf'/></svg>">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <a class="brand" href="index.html"><span class="logo-dot"></span> llm-d Visual Guide</a>
+    <div class="pager">
+      <a href="index.html">☰ All topics</a>
+      <a href="q9.html">← Q9</a>
+      <a href="index.html">Home</a>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="topic-hero reveal">
+    <span class="q-badge">QUESTION 10</span>
+    <h1>How do filesystem, SSD, CephFS, and object-store tiers affect EPP?</h1>
+    <p class="lede">
+      <strong>Short answer:</strong> EPP can index <code>fs</code> and <code>obj</code> locations from
+      store events and score them — but it <strong>never mounts</strong> CephFS, inspects SSD directories,
+      or queries object storage at request time. Identity is <strong>pod + device tier</strong>, not
+      "shared storage domain." Unconfigured tiers fall back to weight <strong>1.0</strong> (like GPU).
+      Store events exist; external deletions often leave <em>stale positives</em>.
+    </p>
+  </section>
+
+  <section class="section reveal">
+    <div class="analogy">
+      <div class="emoji">🏭</div>
+      <div class="body">
+        <span class="a-title">Analogy: warehouse overflow ledgers</span>
+        Each store (pod) keeps a ledger of what <em>it</em> shipped to the regional depot
+        (<strong>(pod + tier entry)</strong>. The depot might be a private shed (local SSD) or a
+        shared warehouse many stores can enter (RWX CephFS) — but the ledger only records the
+        shipper. Sister stores that can grab the same pallet never appear. And if the warehouse
+        throws inventory away without mailing a postcard, the ledger still says the pallet is there.
+      </div>
+    </div>
+  </section>
+
+  <section class="section reveal">
+    <h2><span class="num">1</span> Storage tiers inside the model server</h2>
+    <div class="prose">
+      <p>
+        vLLM can offload KV blocks from GPU through CPU staging into a filesystem root or an object
+        store. When events are enabled, successful stores can publish tier-bearing events EPP indexes.
+        EPP scores from that metadata — it does not verify the bytes still exist.
+      </p>
+    </div>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> GPU → CPU → FS / object store — store events in, external deletes often silent</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 520" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Filesystem and object tier architecture">
+          <defs>
+            <marker id="q10a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <g class="dimmable" data-s="1,2,3">
+            <rect class="zone-box" x="20" y="20" width="560" height="360"/>
+            <text class="t-zone" x="40" y="48">vLLM POD</text>
+            <rect class="node-box s-model" x="60" y="70" width="140" height="60" rx="12"/>
+            <text class="t-title" x="130" y="105" text-anchor="middle">GPU KV</text>
+            <path class="edge e-model flow dimmable" data-s="1" d="M200,100 L260,100" marker-end="url(#q10a)"/>
+            <rect class="node-box s-client" x="260" y="70" width="140" height="60" rx="12"/>
+            <text class="t-title" x="330" y="105" text-anchor="middle">CPU staging</text>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <path class="edge e-storage flow" d="M330,130 L330,170 L120,170 L120,200" marker-end="url(#q10a)"/>
+            <rect class="node-box s-storage" x="50" y="200" width="220" height="90" rx="12"/>
+            <text class="t-title" x="160" y="230" text-anchor="middle">FileSystemTier</text>
+            <text class="t-tiny" x="160" y="252" text-anchor="middle">root_dir · POSIX layout</text>
+            <text class="t-tiny" x="160" y="270" text-anchor="middle">local SSD <em>or</em> RWX CephFS</text>
+          </g>
+
+          <g class="dimmable" data-s="3">
+            <path class="edge e-storage flow" d="M330,130 L330,170 L450,170 L450,200" marker-end="url(#q10a)"/>
+            <rect class="node-box s-storage" x="350" y="200" width="200" height="90" rx="12"/>
+            <text class="t-title" x="450" y="230" text-anchor="middle">ObjectStoreTier</text>
+            <text class="t-tiny" x="450" y="252" text-anchor="middle">async → object URI</text>
+            <text class="t-tiny" x="450" y="270" text-anchor="middle">medium = OBJ</text>
+          </g>
+
+          <g class="dimmable" data-s="4">
+            <path class="edge e-epp flow" d="M580,240 L640,240" marker-end="url(#q10a)"/>
+            <rect class="node-box s-epp" x="640" y="180" width="280" height="120" rx="12"/>
+            <text class="t-title" x="780" y="215" text-anchor="middle">EPP index</text>
+            <text class="t-mono" x="780" y="240" text-anchor="middle">pod + device tier</text>
+            <text class="t-tiny" x="780" y="265" text-anchor="middle">no storage-domain ID</text>
+            <text class="t-tiny" x="780" y="282" text-anchor="middle">weighted prefix score</text>
+          </g>
+
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-danger" x="50" y="320" width="500" height="45" rx="10"/>
+            <text class="t-sub" x="300" y="348" text-anchor="middle">External delete / TTL / PVC GC → often NO BlockRemoved</text>
+          </g>
+
+          <g class="dimmable" data-s="6">
+            <rect class="node-box s-model" x="40" y="410" width="880" height="80" rx="12"/>
+            <text class="t-title" x="480" y="445" text-anchor="middle">Unconfigured tier name → fallback weight 1.0 (valued like GPU!)</text>
+            <text class="t-tiny" x="480" y="470" text-anchor="middle">Shipped defaults define only gpu and cpu — configure fs / obj explicitly from measurements</text>
+          </g>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--model)"></i> GPU</span>
+        <span><i style="background:var(--storage)"></i> Secondary tiers</span>
+        <span><i style="background:var(--epp)"></i> EPP index</span>
+        <span><i style="background:var(--danger)"></i> Silent deletes</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"Secondary storage is a model-server concern. EPP only learns what events tell it — usually successful stores."},
+        {"text":"KV blocks start on GPU, may stage through CPU, then land on a secondary tier."},
+        {"text":"<strong>FilesystemTierManager</strong> writes under <code>root_dir</code> with POSIX ops. Same path can be container-local, node SSD, or RWX CephFS — the event medium is still just \"FS\"."},
+        {"text":"<strong>Object store</strong> path: async transfer, store event after success (<code>medium=OBJ</code>). No automatic event for lifecycle expiry or credential loss."},
+        {"text":"EPP indexes <strong>pod + device tier</strong> (+ optional group). No shared-reader or storage-domain identity. Scorer applies configured (or fallback) weights."},
+        {"text":"Inspected FS/object managers emit store events — not watchers for unlink, PVC GC, bucket TTL, or admin delete. Stale positives are expected without extra reconciliation."},
+        {"text":"Unknown tiers get weight <strong>1.0</strong>. Leaving <code>fs</code>/<code>obj</code> unconfigured can value a remote hit like a GPU hit. Set explicit, measured weights."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+  </section>
+
+  <section class="section reveal">
+    <h2><span class="num">2</span> What EPP can (and cannot) infer from one FS event</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Storage realization</th><th>Likely physical scope</th><th>What one FS event tells EPP</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Container-local path</td>
+            <td>One container / pod lifetime</td>
+            <td>Publishing pod reports a store</td>
+          </tr>
+          <tr>
+            <td>Node-local SSD / hostPath</td>
+            <td>Pods with access to that node/path</td>
+            <td>Publishing pod only — other readers not encoded</td>
+          </tr>
+          <tr>
+            <td>PVC (single-writer)</td>
+            <td>Depends on volume attachment</td>
+            <td>Publishing pod reports a store</td>
+          </tr>
+          <tr>
+            <td>RWX CephFS / Lustre</td>
+            <td>Many pods can mount the same root</td>
+            <td>Publishing pod only — shared readership not expanded</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> Shared CephFS blindness — writer indexed, readers invisible, delete leaves a lie</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Shared filesystem blindness">
+          <defs>
+            <marker id="q10b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-storage" x="330" y="160" width="300" height="80" rx="12"/>
+            <text class="t-title" x="480" y="195" text-anchor="middle">Shared CephFS root</text>
+            <text class="t-tiny" x="480" y="220" text-anchor="middle">same bytes, many possible readers</text>
+          </g>
+
+          <g class="dimmable" data-s="1,2">
+            <rect class="node-box s-model" x="40" y="40" width="160" height="70" rx="12"/>
+            <text class="t-title" x="120" y="70" text-anchor="middle">Pod A</text>
+            <text class="t-tiny" x="120" y="92" text-anchor="middle">writer</text>
+            <path class="edge e-storage flow dimmable" data-s="1" d="M200,75 C260,75 300,140 330,180" marker-end="url(#q10b)"/>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-neutral" x="40" y="280" width="160" height="70" rx="12"/>
+            <text class="t-title" x="120" y="310" text-anchor="middle">Pod B</text>
+            <text class="t-tiny" x="120" y="332" text-anchor="middle">can read — not indexed</text>
+            <rect class="node-box s-neutral" x="760" y="280" width="160" height="70" rx="12"/>
+            <text class="t-title" x="840" y="310" text-anchor="middle">Pod C</text>
+            <text class="t-tiny" x="840" y="332" text-anchor="middle">can read — not indexed</text>
+            <path class="edge" stroke-dasharray="4 4" d="M200,315 L330,220"/>
+            <path class="edge" stroke-dasharray="4 4" d="M760,315 L630,220"/>
+          </g>
+
+          <g class="dimmable" data-s="2,3">
+            <rect class="node-box s-epp" x="700" y="40" width="220" height="90" rx="12"/>
+            <text class="t-title" x="810" y="75" text-anchor="middle">EPP index</text>
+            <text class="t-mono" x="810" y="100" text-anchor="middle">A + tier=fs only</text>
+            <path class="edge e-epp flow dimmable" data-s="2" d="M580,180 C640,140 680,100 700,85" marker-end="url(#q10b)"/>
+          </g>
+
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-danger" x="250" y="360" width="460" height="45" rx="10"/>
+            <text class="t-sub" x="480" y="388" text-anchor="middle">File deleted externally → A's entry remains → stale positive</text>
+          </g>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--model)"></i> Writer pod</span>
+        <span><i style="background:var(--neutral)"></i> Invisible readers</span>
+        <span><i style="background:var(--storage)"></i> Shared FS</span>
+        <span><i style="background:var(--danger)"></i> Stale positive</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"The mismatch: shared storage topology vs. EPP's pod-scoped location model."},
+        {"text":"Pod A successfully stores a block on RWX CephFS. An FS store event fires when events are enabled."},
+        {"text":"EPP records <strong>A + fs</strong>. Pods B and C could mount and read the same file, but nothing expands the index to them unless they publish their own events."},
+        {"text":"Routing understates available readers — traffic may avoid B/C even when they could hit."},
+        {"text":"Delete the shared file outside the manager (TTL, admin, GC). No BlockRemoved reaches EPP → A's entry is a <strong>stale positive</strong> until something else clears it."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="callout tip">
+      <div class="co-title">ⓘ Validation playbook</div>
+      Force a store → prove the model server can reload → observe the event medium → confirm EPP's
+      pod/tier entry → delete via the <em>real</em> retention path → check whether EPP ever learns.
+      For shared FS, read from a non-writing pod. For local SSD, reschedule the pod. For object store,
+      test expiry, credential loss, and throttling. No universal weight without measured workload data.
+    </div>
+  </section>
+
+  <section class="section reveal">
+    <div class="takeaways">
+      <h2>Key takeaways</h2>
+      <ul>
+        <li>EPP indexes FS/object tiers from events — it <strong>does not mount or probe storage</strong> at score time.</li>
+        <li>Identity is <strong>pod + device tier</strong>; shared CephFS readership is not expanded from one writer's event.</li>
+        <li>Inspected managers emit <strong>stores</strong>; external deletes often leave <strong>stale positives</strong>.</li>
+        <li>Unconfigured tiers get weight <strong>1.0</strong> — configure <code>fs</code>/<code>obj</code> deliberately.</li>
+        <li>Fixed per-block weights don't model bandwidth, congestion, or cross-zone cost — measure before shipping.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sources reveal">
+    <h2>Verified sources</h2>
+    <ul>
+      <li><a href="https://github.com/vllm-project/vllm/blob/ab3c1aedf3b9677c1e43b391478554a4b110419e/vllm/v1/kv_offload/tiering/fs/manager.py#L3-L235" target="_blank" rel="noopener">fs/manager.py — FileSystemTierManager layout + store events</a></li>
+      <li><a href="https://github.com/vllm-project/vllm/blob/ab3c1aedf3b9677c1e43b391478554a4b110419e/vllm/v1/kv_offload/tiering/obj/manager.py#L264-L333" target="_blank" rel="noopener">obj/manager.py — object store success events</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvcache/kvblock/index.go#L173-L196" target="_blank" rel="noopener">index.go — PodEntry = pod + DeviceTier</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvcache/kvblock_scorer.go#L89-L103" target="_blank" rel="noopener">kvblock_scorer.go — unknown tier fallback weight 1.0</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/kvcache/backend.go#L19-L30" target="_blank" rel="noopener">backend.go — shipped defaults only gpu / cpu</a></li>
+    </ul>
+  </section>
+
+  <nav class="footer-nav reveal">
+    <a href="q9.html"><span class="dir">← Previous</span><span class="name">Q9 · CPU Offloading &amp; LMCache</span></a>
+    <a class="next" href="index.html"><span class="dir">Home →</span><span class="name">All topics</span></a>
+  </nav>
+</main>
+
+<footer class="site-footer"><div class="container">llm-d Visual Architecture Guide</div></footer>
+<script src="assets/app.js"></script>
+</body>
+</html>

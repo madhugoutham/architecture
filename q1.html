@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Q1 · The EPP Request Pipeline — llm-d Visual Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='%232dd4bf'/></svg>">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <a class="brand" href="index.html"><span class="logo-dot"></span> llm-d Visual Guide</a>
+    <div class="pager">
+      <a href="index.html">☰ All topics</a>
+      <a href="q2.html">Q2 →</a>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="topic-hero reveal">
+    <span class="q-badge">QUESTION 01</span>
+    <h1>What is EPP's request pipeline: filter, score, and pick?</h1>
+    <p class="lede">
+      <strong>Short answer:</strong> EPP is a <em>decision service</em>. The proxy holds the client's
+      connection, pauses each request, and asks EPP: <em>"which model pod should get this?"</em>
+      EPP resolves the request, gathers data, optionally queues it, then runs
+      <strong>filter → score → pick</strong> over the candidate pods and hands one destination back.
+      It never carries the inference bytes itself.
+    </p>
+  </section>
+
+  <section class="section reveal">
+    <div class="analogy">
+      <div class="emoji">🏥</div>
+      <div class="body">
+        <span class="a-title">Analogy: hospital triage</span>
+        Think of EPP as the <strong>triage desk</strong> in an emergency room. Patients (requests) never get
+        treated at the desk. The desk checks who's eligible (<strong>filter</strong>: "Dr. B is off-shift"),
+        ranks the options (<strong>score</strong>: "Dr. A already has this patient's chart and a short line"),
+        and assigns one doctor (<strong>pick</strong>). The actual treatment — prefill, decode, KV cache —
+        happens in the treatment room (the vLLM pod). If the desk burns down, doctors keep treating
+        current patients; only the routing intelligence is lost.
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== DIAGRAM 1: the two planes ===== -->
+  <section class="section reveal">
+    <h2><span class="num">1</span> Two planes: configuration vs. the live request</h2>
+    <p class="prose" style="color:#c3cede">
+      The single biggest source of confusion: <strong>InferencePool is not on the request path.</strong>
+      It's Kubernetes configuration that <em>sets the stage</em>. Once the stage is set, live requests
+      flow only through proxy → EPP → pod.
+    </p>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> Configuration plane (sets up) vs. request plane (runs per request)</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 520" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Configuration plane versus request plane">
+          <defs>
+            <marker id="arr1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,0.7)"/>
+            </marker>
+          </defs>
+
+          <!-- config zone -->
+          <g class="dimmable" data-s="1,2">
+            <rect class="zone-box" x="20" y="30" width="920" height="180"/>
+            <text class="t-zone" x="40" y="58">CONFIGURATION &amp; DISCOVERY — happens once / on change, not per request</text>
+          </g>
+
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-neutral" x="45" y="85" width="200" height="90" rx="12"/>
+            <text class="t-title" x="145" y="115" text-anchor="middle">Gateway API</text>
+            <text class="t-sub" x="145" y="135" text-anchor="middle">Gateway + HTTPRoute</text>
+            <text class="t-tiny" x="145" y="155" text-anchor="middle">"traffic for /v1/* goes to this pool"</text>
+          </g>
+
+          <g class="dimmable" data-s="1,2">
+            <rect class="node-box s-neutral" x="330" y="85" width="210" height="90" rx="12"/>
+            <text class="t-title" x="435" y="112" text-anchor="middle">InferencePool</text>
+            <text class="t-sub" x="435" y="131" text-anchor="middle">label selector → pods</text>
+            <text class="t-tiny" x="435" y="150" text-anchor="middle">EndpointPickerRef → names the EPP</text>
+            <text class="t-tiny" x="435" y="166" text-anchor="middle">(optional — plugins can replace it)</text>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-epp" x="630" y="85" width="270" height="90" rx="12"/>
+            <text class="t-title" x="765" y="115" text-anchor="middle">EPP endpoint datastore</text>
+            <text class="t-sub" x="765" y="136" text-anchor="middle">"pods 10.0.1.5:8000, 10.0.1.6:8000 …"</text>
+            <text class="t-tiny" x="765" y="156" text-anchor="middle">kept fresh by watch / discovery plugin</text>
+          </g>
+
+          <path class="edge flow dimmable" data-s="1" d="M245,130 L330,130" marker-end="url(#arr1)"/>
+          <path class="edge e-epp flow dimmable" data-s="2" d="M540,130 L630,130" marker-end="url(#arr1)"/>
+          <text class="t-label dimmable" data-s="2" x="585" y="120" text-anchor="middle">watch</text>
+
+          <!-- request zone -->
+          <g class="dimmable" data-s="3,4,5">
+            <rect class="zone-box" x="20" y="240" width="920" height="250"/>
+            <text class="t-zone" x="40" y="268">REQUEST PLANE — every single request</text>
+          </g>
+
+          <g class="dimmable" data-s="3,5">
+            <rect class="node-box s-client" x="45" y="330" width="130" height="70" rx="12"/>
+            <text class="t-title" x="110" y="360" text-anchor="middle">Client</text>
+            <text class="t-tiny" x="110" y="380" text-anchor="middle">chat/completions</text>
+          </g>
+
+          <g class="dimmable" data-s="3,4,5">
+            <rect class="node-box s-proxy" x="250" y="320" width="170" height="90" rx="12"/>
+            <text class="t-title" x="335" y="352" text-anchor="middle">Proxy</text>
+            <text class="t-sub" x="335" y="372" text-anchor="middle">Envoy / Istio / L7 LB</text>
+            <text class="t-tiny" x="335" y="392" text-anchor="middle">holds both connections</text>
+          </g>
+
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-epp" x="500" y="300" width="200" height="130" rx="12"/>
+            <text class="t-title" x="600" y="330" text-anchor="middle">EPP</text>
+            <rect class="inner-box" x="518" y="345" width="164" height="26"/>
+            <text class="t-mono" x="600" y="362" text-anchor="middle">filter → score → pick</text>
+            <text class="t-tiny" x="600" y="392" text-anchor="middle">reads endpoint datastore</text>
+            <text class="t-tiny" x="600" y="410" text-anchor="middle">+ metric snapshots</text>
+          </g>
+
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-model" x="780" y="320" width="140" height="90" rx="12"/>
+            <text class="t-title" x="850" y="352" text-anchor="middle">vLLM pod</text>
+            <text class="t-tiny" x="850" y="374" text-anchor="middle">prefill · decode</text>
+            <text class="t-tiny" x="850" y="392" text-anchor="middle">KV cache lives here</text>
+          </g>
+
+          <path class="edge e-client flow dimmable" data-s="3" d="M175,365 L250,365" marker-end="url(#arr1)"/>
+          <path class="edge e-epp flow dimmable" data-s="4" d="M420,350 L500,350" marker-end="url(#arr1)"/>
+          <text class="t-label dimmable" data-s="4" x="460" y="340" text-anchor="middle">ext-proc</text>
+          <path class="edge e-epp flow dimmable" data-s="4" d="M500,390 L420,390" marker-end="url(#arr1)"/>
+          <text class="t-label dimmable" data-s="4" x="460" y="410" text-anchor="middle">destination</text>
+          <path class="edge e-model flow dimmable" data-s="5" d="M420,365 C560,470 700,380 780,370" marker-end="url(#arr1)"/>
+          <text class="t-label dimmable" data-s="5" x="610" y="455" text-anchor="middle">forward to chosen pod</text>
+
+          <!-- config feeds request plane -->
+          <path class="edge dimmable" data-s="2,4" stroke-dasharray="3 5" d="M765,175 C765,230 640,260 610,300" marker-end="url(#arr1)"/>
+          <text class="t-tiny dimmable" data-s="2,4" x="740" y="245">datastore feeds scheduling</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--neutral)"></i> Kubernetes config</span>
+        <span><i style="background:var(--client)"></i> Client</span>
+        <span><i style="background:var(--proxy)"></i> Proxy</span>
+        <span><i style="background:var(--epp)"></i> EPP</span>
+        <span><i style="background:var(--model)"></i> Model server</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"Two separate worlds. The <strong>top half</strong> runs when you apply YAML or pods change. The <strong>bottom half</strong> runs for every request. Confusing these two planes is mistake #1 when learning llm-d."},
+        {"text":"An operator creates <strong>Gateway + HTTPRoute</strong> objects: \"requests matching this route go to this InferencePool\". A controller programs the proxy accordingly. This happens once, not per request."},
+        {"text":"The <strong>InferencePool</strong> selects model pods by label and names which EPP to use. EPP watches it and fills its <strong>endpoint datastore</strong> — its private list of candidate pod addresses. (A custom discovery plugin can replace InferencePool entirely.)"},
+        {"text":"Now a real request: a client sends a chat/completions call. It lands on the <strong>proxy</strong> — the only process holding the client's TCP connection."},
+        {"text":"The proxy consults <strong>EPP</strong> via ext-proc. EPP looks at its already-populated datastore and metric snapshots, runs filter → score → pick, and replies with one destination address. Notice InferencePool is nowhere in this hop."},
+        {"text":"The proxy forwards the request to the chosen <strong>vLLM pod</strong>, which does prefill and decode and streams tokens back through the proxy. EPP is out of the picture until the next request."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <div class="callout info">
+      <div class="co-title">ⓘ Who owns what</div>
+      The <strong>proxy</strong> owns connections. <strong>EPP</strong> owns the routing decision.
+      The <strong>model server</strong> owns prefill, decode, and the KV-cache tensors.
+      <strong>InferencePool</strong> owns nothing at runtime — it's declarative configuration that tells
+      the controller and EPP how to set themselves up.
+    </div>
+  </section>
+
+  <!-- ===== DIAGRAM 2: inside the Director ===== -->
+  <section class="section reveal">
+    <h2><span class="num">2</span> Inside EPP: the full Director pipeline</h2>
+    <p class="prose" style="color:#c3cede">
+      "Filter, score, pick" is the famous part, but it's only the <em>core</em> of a longer pipeline
+      called the <strong>Director</strong>. Here's the real per-request sequence, in order.
+    </p>
+
+    <div class="diagram-card">
+      <div class="diagram-title"><span class="dot"></span> Director.HandleRequest — one request's journey through EPP</div>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="EPP Director pipeline stages">
+          <defs>
+            <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="rgba(45,212,191,0.8)"/>
+            </marker>
+          </defs>
+
+          <!-- EPP outer -->
+          <rect class="zone-box" x="20" y="20" width="920" height="520"/>
+          <text class="t-zone" x="40" y="48">EPP DIRECTOR — runs top to bottom for each request</text>
+
+          <!-- Stage boxes: 2 columns flow -->
+          <!-- col 1 -->
+          <g class="dimmable" data-s="1">
+            <rect class="node-box s-epp" x="50" y="75" width="270" height="80" rx="12"/>
+            <text class="t-title" x="185" y="103" text-anchor="middle">1 · Resolve</text>
+            <text class="t-sub" x="185" y="123" text-anchor="middle">model rewrite · objective</text>
+            <text class="t-tiny" x="185" y="142" text-anchor="middle">"which model, what QoS goal?"</text>
+          </g>
+
+          <g class="dimmable" data-s="2">
+            <rect class="node-box s-epp" x="50" y="185" width="270" height="80" rx="12"/>
+            <text class="t-title" x="185" y="213" text-anchor="middle">2 · Produce request data</text>
+            <text class="t-sub" x="185" y="233" text-anchor="middle">tokenize/prefix keys · headers</text>
+            <text class="t-tiny" x="185" y="252" text-anchor="middle">data producers run here (see Q3)</text>
+          </g>
+
+          <g class="dimmable" data-s="3">
+            <rect class="node-box s-proxy" x="50" y="295" width="270" height="80" rx="12"/>
+            <text class="t-title" x="185" y="323" text-anchor="middle">3 · Flow control / admit</text>
+            <text class="t-sub" x="185" y="343" text-anchor="middle">may queue or shed by priority</text>
+            <text class="t-tiny" x="185" y="362" text-anchor="middle">only when configured for the objective</text>
+          </g>
+
+          <g class="dimmable" data-s="4,5,6">
+            <rect class="node-box s-epp" x="50" y="405" width="270" height="110" rx="12"/>
+            <text class="t-title" x="185" y="433" text-anchor="middle">4 · Scheduling core</text>
+            <rect class="inner-box" x="70" y="447" width="230" height="24"/>
+            <text class="t-mono" x="185" y="463" text-anchor="middle">FILTER → SCORE → PICK</text>
+            <text class="t-tiny" x="185" y="492" text-anchor="middle">the part everyone talks about</text>
+          </g>
+
+          <!-- col 2: the scheduling core zoom -->
+          <g class="dimmable" data-s="4">
+            <rect class="node-box s-danger" x="420" y="75" width="490" height="120" rx="12"/>
+            <text class="t-title" x="440" y="103">FILTER — hard eligibility</text>
+            <text class="t-sub" x="440" y="126">Removes pods that must not serve this request.</text>
+            <text class="t-sub" x="440" y="146">Wrong role (prefill vs decode) · not ready · label mismatch.</text>
+            <text class="t-tiny" x="440" y="170">⚠ A filtered-out pod can NEVER be rescued by a good score.</text>
+            <!-- pods -->
+            <circle class="f-model" cx="790" cy="110" r="11"/>
+            <circle class="f-model" cx="825" cy="110" r="11"/>
+            <circle class="f-danger" cx="860" cy="110" r="11" opacity="0.5"/>
+            <text class="t-tiny" x="825" y="145" text-anchor="middle">3 pods → 2 survive</text>
+            <line x1="852" y1="102" x2="868" y2="118" stroke="var(--danger)" stroke-width="2"/>
+            <line x1="868" y1="102" x2="852" y2="118" stroke="var(--danger)" stroke-width="2"/>
+          </g>
+
+          <g class="dimmable" data-s="5">
+            <rect class="node-box s-client" x="420" y="215" width="490" height="140" rx="12"/>
+            <text class="t-title" x="440" y="243">SCORE — soft preference, weighted sum</text>
+            <text class="t-mono" x="440" y="270">score = 2·queue + 2·kv-utilization + 3·prefix-locality</text>
+            <text class="t-sub" x="440" y="295">Each scorer rates every surviving pod; weights multiply,</text>
+            <text class="t-sub" x="440" y="315">results add. Defaults shown — fully configurable.</text>
+            <text class="t-tiny" x="440" y="340">Prefix locality gets the biggest default weight (3) on purpose.</text>
+            <!-- bars -->
+            <rect x="790" y="240" width="14" height="70" rx="3" fill="rgba(96,165,250,0.25)"/>
+            <rect x="790" y="275" width="14" height="35" rx="3" class="f-client"/>
+            <rect x="820" y="240" width="14" height="70" rx="3" fill="rgba(96,165,250,0.25)"/>
+            <rect x="820" y="252" width="14" height="58" rx="3" class="f-client"/>
+            <text class="t-tiny" x="797" y="328" text-anchor="middle">A: 4.1</text>
+            <text class="t-tiny" x="827" y="328" text-anchor="middle">B: 6.3</text>
+          </g>
+
+          <g class="dimmable" data-s="6">
+            <rect class="node-box s-storage" x="420" y="375" width="490" height="90" rx="12"/>
+            <text class="t-title" x="440" y="403">PICK — choose exactly one</text>
+            <text class="t-sub" x="440" y="426">Default: max-score picker (highest total wins, ties random).</text>
+            <text class="t-sub" x="440" y="446">Alternative: weighted-random (probability ∝ score).</text>
+            <circle class="f-storage pulse" cx="825" cy="415" r="13" style="color:var(--storage)"/>
+            <text x="825" y="420" text-anchor="middle" font-size="11" font-weight="800" fill="#052e22">B</text>
+            <text class="t-tiny" x="825" y="450" text-anchor="middle">winner</text>
+          </g>
+
+          <g class="dimmable" data-s="7">
+            <rect class="node-box s-model" x="420" y="485" width="490" height="45" rx="12"/>
+            <text class="t-title" x="440" y="513">5 · Prepare destination → return “pod B” to proxy</text>
+          </g>
+
+          <!-- flow arrows col1 -->
+          <path class="edge e-epp flow dimmable" data-s="2" d="M185,155 L185,185" marker-end="url(#arr2)"/>
+          <path class="edge e-epp flow dimmable" data-s="3" d="M185,265 L185,295" marker-end="url(#arr2)"/>
+          <path class="edge e-epp flow dimmable" data-s="4" d="M185,375 L185,405" marker-end="url(#arr2)"/>
+          <path class="edge e-epp flow dimmable" data-s="4" d="M320,460 C370,460 380,135 420,135" marker-end="url(#arr2)"/>
+          <path class="edge e-epp flow dimmable" data-s="5" d="M665,195 L665,215" marker-end="url(#arr2)"/>
+          <path class="edge e-epp flow dimmable" data-s="6" d="M665,355 L665,375" marker-end="url(#arr2)"/>
+          <path class="edge e-epp flow dimmable" data-s="7" d="M665,465 L665,485" marker-end="url(#arr2)"/>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--danger)"></i> Filter (eliminate)</span>
+        <span><i style="background:var(--client)"></i> Score (rank)</span>
+        <span><i style="background:var(--storage)"></i> Pick (choose)</span>
+        <span><i style="background:var(--epp)"></i> Director stages</span>
+      </div>
+      <script type="application/json" class="steps">[
+        {"text":"The full Director pipeline. The left column is what happens <em>around</em> scheduling; the right column zooms into the famous <strong>filter → score → pick</strong> core."},
+        {"text":"<strong>Resolve.</strong> The Director first rewrites/resolves the requested model name and figures out the scheduling objective (priority, QoS goal). Header processors run here too."},
+        {"text":"<strong>Produce request data.</strong> Anything the scorers will need about <em>this request</em> gets computed now — most importantly prefix-cache keys from the prompt (covered in Q3)."},
+        {"text":"<strong>Flow control.</strong> If configured for this objective, the request can be queued or shed here based on priority — before any pod is even considered. Skipped when not configured."},
+        {"text":"<strong>FILTER — hard rules.</strong> Every configured filter runs against the candidate set. A pod removed here is gone for good: no score, however high, can bring it back. Typical reasons: wrong role (a prefill-only pod for a decode job), not ready, label mismatch."},
+        {"text":"<strong>SCORE — soft preferences.</strong> Each scorer rates every survivor, weights multiply, results add. Defaults: queue depth ×2, KV-cache utilization ×2, prefix locality ×3. Locality deliberately dominates — skipping redundant prefill is the single biggest latency win."},
+        {"text":"<strong>PICK — one winner.</strong> The default max-score picker takes the highest total (ties broken randomly). Weighted-random exists as an explicit alternative. If a profile forgets a picker, the loader silently inserts max-score."},
+        {"text":"<strong>Prepare destination.</strong> The Director packages \"send it to pod B\" and returns it to the proxy, which forwards the request. EPP's job for this request is done."}
+      ]</script>
+      <div class="player"></div>
+    </div>
+
+    <ol class="steps-list">
+      <li><strong>Filters are vetoes, not opinions.</strong> Filter order can matter for performance, but semantically the result is the intersection: only pods passing <em>every</em> filter survive.</li>
+      <li><strong>Scorers never eliminate.</strong> A pod with a terrible score is still pickable (and weighted-random might even pick it). Elimination is exclusively the filter's job.</li>
+      <li><strong>The picker is pluggable.</strong> Max-score is the default; weighted-random trades some optimality for load spreading; a custom picker can implement anything.</li>
+    </ol>
+  </section>
+
+  <!-- ===== failure boundaries ===== -->
+  <section class="section reveal">
+    <h2><span class="num">3</span> What breaks when EPP breaks?</h2>
+    <div class="prose">
+      <p>
+        EPP <em>does</em> hold state — discovered endpoints, metric snapshots, prefix-location metadata,
+        flow-control queues, in-flight request context. But none of it is model state. Weights,
+        conversations, and KV tensors all live in the model servers. Most EPP state can be rebuilt
+        after a restart, though a cold replica may briefly make worse locality decisions (Q4 covers this).
+      </p>
+      <p>
+        The real question is: <strong>what does the proxy do when EPP doesn't answer?</strong>
+        That's governed by <code>failureMode</code> on the extension config:
+      </p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Mode</th><th>When EPP fails…</th><th>Trade-off</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>FailClose</code> (GIE default)</td>
+            <td>The proxy <strong>drops the request</strong>.</td>
+            <td>No "dumb" routing ever happens — but EPP becomes a hard availability dependency.</td>
+          </tr>
+          <tr>
+            <td><code>FailOpen</code> (llm-d chart default)</td>
+            <td>The proxy <strong>picks an endpoint itself</strong>, with its ordinary load balancing.</td>
+            <td>Requests keep flowing — but prefix locality, flow control, QoS, and the picker are all bypassed. No promise of round-robin or stream continuity.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout warn">
+      <div class="co-title">⚠ Common misconception</div>
+      "Fail-open means graceful degradation to round-robin." Not guaranteed. Fail-open only means the
+      <em>parent data plane</em> chooses however it normally would. Which algorithm that is depends
+      entirely on the proxy's own configuration — and in-flight streams get no special protection.
+    </div>
+
+    <div class="prose">
+      <p>
+        For high availability, EPP replicas can run with a warm-standby pattern: the ext-proc server runs
+        on every replica (no leader election for serving), while a separate feature can pre-populate a
+        non-leader's datastores so it isn't cold when it takes over. How availability actually composes —
+        active serving, leader-controlled discovery, warm standby, proxy fail-open — is a deployment
+        decision, not a single built-in behavior.
+      </p>
+    </div>
+  </section>
+
+  <section class="section reveal">
+    <div class="takeaways">
+      <h2>Key takeaways</h2>
+      <ul>
+        <li><strong>EPP decides, the proxy moves bytes, the model server computes.</strong> Three roles, never mixed.</li>
+        <li><strong>InferencePool is configuration</strong>, not a runtime hop — and it's optional if a discovery plugin supplies endpoints.</li>
+        <li>The pipeline is bigger than three steps: <strong>resolve → produce data → flow control → filter → score → pick → prepare destination</strong>.</li>
+        <li><strong>Filters veto (irreversibly), scorers rank (weighted 2/2/3 by default), the picker chooses one</strong> (max-score by default).</li>
+        <li>EPP failure behavior lives in the proxy: <strong>FailClose drops, FailOpen bypasses all EPP intelligence</strong>. llm-d's chart ships FailOpen.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sources reveal">
+    <h2>Verified sources</h2>
+    <ul>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/main/docs/architecture.md" target="_blank" rel="noopener">llm-d-router · Architecture documentation</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/requestcontrol/director.go#L232-L363" target="_blank" rel="noopener">Director.HandleRequest — full pipeline ordering (pinned revision)</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/scheduling/scheduler_profile.go#L120-L258" target="_blank" rel="noopener">scheduler_profile.go — filter, score, pick execution</a></li>
+      <li><a href="https://github.com/llm-d/llm-d-router/blob/4a6c4164cc4881e634c66974810b2c50d0859a1b/pkg/epp/config/loader/defaults.go#L41-L103" target="_blank" rel="noopener">defaults.go — default profile weights (2 / 2 / 3)</a></li>
+      <li><a href="https://gateway-api-inference-extension.sigs.k8s.io/" target="_blank" rel="noopener">Gateway API Inference Extension — official docs</a></li>
+      <li><a href="https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/ffe3e7f3b790061495546bb1362cad3e7be3db7e/api/v1/inferencepool_types.go#L59-L188" target="_blank" rel="noopener">InferencePoolSpec + failureMode semantics</a></li>
+    </ul>
+  </section>
+
+  <nav class="footer-nav reveal">
+    <a href="index.html"><span class="dir">← Back</span><span class="name">All topics</span></a>
+    <a class="next" href="q2.html"><span class="dir">Next →</span><span class="name">Q2 · Metrics: Collected vs. Scored</span></a>
+  </nav>
+</main>
+
+<footer class="site-footer"><div class="container">llm-d Visual Architecture Guide</div></footer>
+<script src="assets/app.js"></script>
+</body>
+</html>
